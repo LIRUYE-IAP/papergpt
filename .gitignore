@@ -1,9 +1,15 @@
 .vscode/
 .env
 .env.local
+.venv/
+.python/
+.uv-cache/
+*.egg-info/
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
+htmlcov/
 node_modules/
 storage/*
 !storage/.gitkeep
