@@ -1,19 +1,21 @@
 # PaperGPT Roadmap
 
-## Phase 0 — Project Foundation
+## Phase 0 — Implemented
 
-- Establish the FastAPI application and versioned health endpoint.
-- Configure PostgreSQL with pgvector and Redis for local development.
-- Establish SQLAlchemy models and Alembic migrations for users and papers.
-- Add a minimal automated backend test and verified frontend build.
-- Document local startup and architecture.
+- Next.js and FastAPI foundations.
+- PostgreSQL with pgvector and Redis local infrastructure.
+- SQLAlchemy models, Alembic, health checks, and baseline tests.
 
-Phase 0 stops at infrastructure. The presence of model fields or provider configuration does not imply that related product behavior is implemented.
+## Phase 1 — Implemented
 
-## Phase 1 — Not implemented
+- Account registration, Argon2 password hashing, login, JWT bearer authentication, and `/auth/me`.
+- Authenticated PDF upload with validation, configurable size limit, SHA-256, and local storage abstraction.
+- Per-user paper list, detail, and deletion with backend ownership enforcement.
+- Minimal registration, login, library, upload, detail, and delete UI.
+- Integration tests for authentication, upload, CRUD, storage deletion, and ownership isolation.
 
-Phase 1 has not started. Its scope requires separate approval and is intentionally absent from the current codebase.
+Phase 1 intentionally does not parse PDF contents or invoke any AI provider.
 
-## Later phases
+## Phase 2 — Not implemented
 
-Future phases may introduce authentication, document ingestion and parsing, translation, AI provider integration, retrieval-augmented generation, chat, background jobs, exports, and commercial features. Their requirements and sequencing must be defined before implementation; Phase 0 does not pre-build them.
+Phase 2 has not started. Document parsing, OCR, background processing, translation, retrieval, AI chat, exports, and commercial features remain future work and require separate approval before implementation.

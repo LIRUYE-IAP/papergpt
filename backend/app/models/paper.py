@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     ForeignKey,
     Integer,
@@ -52,6 +53,7 @@ class Paper(Base):
     source_language: Mapped[str | None] = mapped_column(String(32))
     target_language: Mapped[str | None] = mapped_column(String(32))
     page_count: Mapped[int | None] = mapped_column(Integer)
+    file_size: Mapped[int] = mapped_column(BigInteger)
 
     file_key: Mapped[str] = mapped_column(String(1024), unique=True)
     file_hash: Mapped[str] = mapped_column(String(128), index=True)
@@ -60,13 +62,13 @@ class Paper(Base):
     )
 
     parse_status: Mapped[str] = mapped_column(
-        String(32), default="pending", server_default="pending"
+        String(32), default="NOT_STARTED", server_default="NOT_STARTED"
     )
     translation_status: Mapped[str] = mapped_column(
-        String(32), default="pending", server_default="pending"
+        String(32), default="NOT_STARTED", server_default="NOT_STARTED"
     )
     qa_status: Mapped[str] = mapped_column(
-        String(32), default="pending", server_default="pending"
+        String(32), default="PENDING", server_default="PENDING"
     )
 
     current_page: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

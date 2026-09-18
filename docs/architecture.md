@@ -1,32 +1,48 @@
 # PaperGPT Architecture
 
-## Phase 0 system shape
+## Current system — Phase 1
 
-PaperGPT starts as a modular monolith with independently runnable frontend and backend applications. Phase 0 establishes infrastructure and data foundations only; it contains no authentication, document-processing, translation, retrieval, chat, billing, or payment workflows.
+PaperGPT is a modular monolith with an independently runnable Next.js frontend and FastAPI backend.
 
 | Layer | Technology | Current responsibility |
 | --- | --- | --- |
-| Frontend | Next.js | Existing web application shell |
-| Backend | FastAPI | Versioned HTTP API and health checks |
-| Database | PostgreSQL + pgvector | Relational persistence and future vector support |
-| Cache / broker | Redis | Connectivity foundation; no background jobs yet |
+| Frontend | Next.js App Router | Registration, login, library, upload, detail, and delete UI |
+| Backend | FastAPI | Versioned Auth, Paper, and health APIs |
+| Persistence | SQLAlchemy 2 + Alembic | User/Paper models and versioned schema changes |
+| Database | PostgreSQL + pgvector | Account and paper metadata; vector extension reserved for later phases |
+| Cache foundation | Redis | Connectivity only; no background tasks in Phase 1 |
+| File storage | Local filesystem abstraction | Original PDF storage under system-generated object keys |
+
+## Authentication and isolation
+
+- Passwords are hashed with pwdlib's recommended Argon2 implementation and are never returned by the API.
+- FastAPI issues HS256 JWT bearer tokens containing `sub` and `exp`; the signing secret comes only from the root `.env`.
+- Paper queries always include the authenticated user ID. Detail and delete return the same not-found response for missing and unowned records.
+- The frontend uses a deliberately small client-side token strategy based on `localStorage`; no global state library is introduced in Phase 1.
+- CORS accepts only the configured `FRONTEND_ORIGIN`, never `*`.
+
+## Upload and storage flow
+
+1. The API validates authentication, `.pdf` extension, `application/pdf` content type, non-empty content, and the configured size limit.
+2. The file is streamed in bounded chunks while calculating SHA-256.
+3. Local storage writes to a temporary file and atomically moves it to `papers/{user_id}/{paper_id}/original/original.pdf`.
+4. PostgreSQL stores the generated object key, hash, size, display filename, and Phase 1 statuses.
+5. A database failure removes the newly written file. Deletion stages the file before committing the database delete and restores it if the transaction fails.
 
 ## Backend boundaries
 
-- `api/` owns HTTP routing and versioning.
+- `api/` owns HTTP transport, versioning, and authentication dependencies.
 - `core/` owns environment-based configuration.
 - `db/` owns SQLAlchemy base, engine, and sessions.
 - `models/` owns persisted entities and relationships.
-- `schemas/` owns API request and response contracts.
-- `services/` owns application and infrastructure checks outside the transport layer.
-- Alembic is the only supported mechanism for database schema changes.
+- `schemas/` owns API contracts.
+- `services/` owns authentication, paper workflows, and storage abstractions.
+- Alembic is the only supported schema-change mechanism.
 
-## Future abstractions
+## Future only — not implemented
 
-- **Async future:** Redis + Celery. Celery is intentionally not installed or configured in Phase 0.
-- **Storage future:** an S3-compatible storage abstraction. Local `storage/` is only a development placeholder.
-- **AI future:** a provider abstraction capable of supporting multiple model vendors. Provider keys are reserved in configuration, but no provider SDK or AI call exists in Phase 0.
-
-## Data foundation
-
-`User` owns zero or more `Paper` records. Deleting a user cascades to that user's papers. PostgreSQL stores paper metadata in conventional columns and author metadata in JSONB. The `vector` extension is enabled for later phases, but no embedding column or retrieval behavior is introduced yet.
+- **Document engine:** PDF parsing, OCR, blocks, and sections.
+- **Async processing:** Redis + Celery tasks and progress delivery.
+- **Storage:** an S3-compatible implementation behind the storage abstraction.
+- **AI:** provider abstraction, translation, embeddings, RAG, and chat.
+- **Product:** notes, glossary, Word export, membership, plans, and payments.

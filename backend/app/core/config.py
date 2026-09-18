@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str
     storage_root: Path = PROJECT_ROOT / "storage"
+    jwt_expiration_minutes: int = Field(default=60, gt=0)
+    max_pdf_upload_mb: int = Field(default=20, gt=0, le=1024)
+    frontend_origin: str = "http://localhost:3000"
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None

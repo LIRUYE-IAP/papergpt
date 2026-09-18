@@ -1,28 +1,35 @@
 # PaperGPT
 
-PaperGPT currently contains a Next.js frontend and a FastAPI backend foundation. Phase 0 provides local PostgreSQL/pgvector and Redis infrastructure, initial database models and migration, and health checks. It does not implement product workflows or AI calls.
+PaperGPT Phase 1 provides account registration and login, authenticated PDF upload, a per-user paper library, basic paper details, and deletion from both PostgreSQL and local storage. PDF parsing, translation, AI, RAG, background jobs, exports, and commercial features are not implemented.
 
 ## Prerequisites
 
-- `uv` (manages the project's Python 3.12 runtime and virtual environment)
+- `uv` for the project-local Python 3.12 runtime and `.venv`
 - Node.js and npm
 - Docker with Docker Compose
 
-## Environment configuration
+## Environment
 
-From the project root, create a local environment file without committing it:
+From the project root:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-The values in `.env.example` are local-development placeholders. Before first startup, set `POSTGRES_PASSWORD`, update the matching password inside `DATABASE_URL`, and replace `SECRET_KEY` in `.env`. Keep real secrets only in `.env` or an external secret manager. The `.env` file is ignored by Git.
+Replace the local database password in both `POSTGRES_PASSWORD` and `DATABASE_URL`, and replace `SECRET_KEY` with a random local secret. Do not commit `.env`. Phase 1 also uses:
 
-## Backend Python environment
+- `JWT_EXPIRATION_MINUTES`: access-token lifetime
+- `MAX_PDF_UPLOAD_MB`: PDF upload limit
+- `FRONTEND_ORIGIN`: the single allowed browser origin for CORS
+- `STORAGE_ROOT`: local file-storage root
 
-The root `.venv` is the only supported backend development environment. Do not install PaperGPT dependencies into a Conda environment or a global Python installation.
+Provider API keys remain empty because Phase 1 makes no AI calls.
 
-Run the following from the project root in PowerShell. The conditional command creates `.venv` when it is missing; the final command installs or restores all backend and test dependencies in that same environment:
+## Backend environment
+
+The root `.venv` is the only supported backend development environment. The optional `.python/` directory is uv-managed local tooling, not source code and not the backend environment.
+
+Run from the project root in PowerShell:
 
 ```powershell
 $env:UV_PYTHON_INSTALL_DIR = Join-Path (Get-Location) ".python"
@@ -33,52 +40,59 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".\backend[dev]"
 .\.venv\Scripts\python.exe --version
 ```
 
-The expected version is Python 3.12. The `.python/` directory is an optional uv-managed local Python runtime used to create `.venv`; it is ignored local tooling, not project source code and not the backend environment itself. Backend commands must use `.venv\Scripts\python.exe`.
-
-## Infrastructure
+## Infrastructure and migration
 
 From the project root:
 
 ```powershell
-docker compose up -d
+docker compose up -d --wait
 docker compose ps
-```
-
-PostgreSQL is exposed on `localhost:5432`, Redis on `localhost:6379`, and their data is retained in named Docker volumes.
-
-## Database migration
-
-From the project root:
-
-```powershell
 Set-Location backend
 ..\.venv\Scripts\python.exe -m alembic upgrade head
 ..\.venv\Scripts\python.exe -m alembic current
 ```
 
-## Backend tests
+PostgreSQL/pgvector listens on `localhost:5432`; Redis listens on `localhost:6379`. Both use named Docker volumes.
+
+## FastAPI and tests
 
 From `backend/`:
 
 ```powershell
 ..\.venv\Scripts\python.exe -m pytest
-```
-
-## FastAPI
-
-From `backend/`:
-
-```powershell
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-The API documentation is available at `http://127.0.0.1:8000/docs`. In another terminal, verify the health endpoint:
+OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/health
+## Phase 1 API
+
+All paper endpoints require `Authorization: Bearer <access_token>`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/auth/register` | Create an account |
+| `POST` | `/api/v1/auth/login` | Return a JWT access token |
+| `GET` | `/api/v1/auth/me` | Return the authenticated user |
+| `POST` | `/api/v1/papers` | Upload one PDF as multipart field `file` |
+| `GET` | `/api/v1/papers` | List the current user's papers |
+| `GET` | `/api/v1/papers/{paper_id}` | Read an owned paper's metadata |
+| `DELETE` | `/api/v1/papers/{paper_id}` | Delete an owned paper and stored file |
+| `GET` | `/api/v1/health` | Check API, PostgreSQL, and Redis |
+
+Passwords are Argon2 hashes. JWTs contain the user ID in `sub` and an `exp` claim. Ownership is enforced by backend queries; an unowned paper is returned as not found.
+
+Uploaded files are streamed to a system-generated key:
+
+```text
+storage/papers/{user_id}/{paper_id}/original/original.pdf
 ```
 
+Only the object key and metadata are stored in PostgreSQL. The browser-provided filename is retained only as `original_filename` for display.
+
 ## Frontend
+
+The frontend defaults to `http://localhost:8000/api/v1`. To override it, copy `frontend/.env.example` to `frontend/.env.local` and change `NEXT_PUBLIC_API_BASE_URL`.
 
 From the project root in another terminal:
 
@@ -88,10 +102,17 @@ npm.cmd ci
 npm.cmd run dev
 ```
 
-Create a production build with:
+Production verification:
 
 ```powershell
 npm.cmd run build
 ```
 
-The frontend remains the existing Next.js application and was not regenerated in Phase 0. Use `npm.cmd` in Windows PowerShell so the commands do not depend on PowerShell script-execution policy.
+Implemented pages:
+
+- `/register`
+- `/login`
+- `/library`
+- `/paper/[id]`
+
+The Phase 1 browser client stores its bearer token in `localStorage`. No PDF reader, parser, translation progress, or AI experience is present yet.
