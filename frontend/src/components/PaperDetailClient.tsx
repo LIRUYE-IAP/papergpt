@@ -2,62 +2,387 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
-import { apiRequest, clearToken, getToken, Paper } from "@/lib/api";
+import PdfViewer, { type ReaderPanelHandle } from "@/components/PdfViewer";
+import StructuredReader from "@/components/StructuredReader";
+import {
+  API_BASE_URL,
+  ApiError,
+  apiRequest,
+  clearToken,
+  type DocumentBlock,
+  getToken,
+  type OutlineSection,
+  type Paper,
+  type ParseResult,
+} from "@/lib/api";
+import { sortByReadingOrder } from "@/lib/reader";
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+import styles from "./Reader.module.css";
+
+type ReaderMode = "split" | "original" | "structured";
+type SyncSource = "pdf" | "document" | "restore";
+
+type OutlineProps = {
+  sections: OutlineSection[];
+  onSelect: (section: OutlineSection) => void;
+};
+
+function Outline({ sections, onSelect }: OutlineProps) {
+  return (
+    <ul className={styles.outlineList}>
+      {sections.map((section) => (
+        <li key={section.id}>
+          <button type="button" onClick={() => onSelect(section)}>
+            {section.title_original}
+          </button>
+          {section.children.length > 0 && (
+            <Outline sections={section.children} onSelect={onSelect} />
+          )}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export default function PaperDetailClient({ paperId }: { paperId: string }) {
   const router = useRouter();
+  const pdfRef = useRef<ReaderPanelHandle>(null);
+  const documentRef = useRef<ReaderPanelHandle>(null);
+  const syncSourceRef = useRef<SyncSource | null>(null);
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialAnchorAppliedRef = useRef(false);
+
+  const [token, setToken] = useState("");
   const [paper, setPaper] = useState<Paper | null>(null);
+  const [blocks, setBlocks] = useState<DocumentBlock[]>([]);
+  const [outline, setOutline] = useState<OutlineSection[]>([]);
+  const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
+  const [mode, setMode] = useState<ReaderMode>("split");
+  const [outlineOpen, setOutlineOpen] = useState(true);
+  const [isParsing, setIsParsing] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const handleAuthFailure = useCallback(() => {
+    clearToken();
+    router.replace("/login");
+  }, [router]);
+
+  const loadReaderData = useCallback(async (accessToken: string) => {
+    const [loadedBlocks, loadedOutline] = await Promise.all([
+      apiRequest<DocumentBlock[]>(`/papers/${paperId}/blocks`, {}, accessToken),
+      apiRequest<OutlineSection[]>(`/papers/${paperId}/outline`, {}, accessToken),
+    ]);
+    setBlocks(sortByReadingOrder(loadedBlocks));
+    setOutline(loadedOutline);
+  }, [paperId]);
+
+  const loadPaper = useCallback(
+    async (accessToken: string) => {
+      const loadedPaper = await apiRequest<Paper>(
+        `/papers/${paperId}`,
+        {},
+        accessToken,
+      );
+      setPaper(loadedPaper);
+      if (loadedPaper.parse_status === "COMPLETED") {
+        await loadReaderData(accessToken);
+      } else {
+        setBlocks([]);
+        setOutline([]);
+      }
+      return loadedPaper;
+    },
+    [loadReaderData, paperId],
+  );
+
   useEffect(() => {
-    const token = getToken();
-    if (!token) {
-      router.replace("/login");
-      return;
-    }
-    apiRequest<Paper>(`/papers/${paperId}`, {}, token)
-      .then(setPaper)
-      .catch((requestError) => {
-        if (requestError?.status === 401) {
-          clearToken();
-          router.replace("/login");
+    async function initializeReader() {
+      const accessToken = getToken();
+      if (!accessToken) {
+        handleAuthFailure();
+        return;
+      }
+      setToken(accessToken);
+      try {
+        await loadPaper(accessToken);
+      } catch (requestError: unknown) {
+        if (requestError instanceof ApiError && requestError.status === 401) {
+          handleAuthFailure();
           return;
         }
-        setError(requestError instanceof Error ? requestError.message : "无法加载论文");
-      });
-  }, [paperId, router]);
+        setError(
+          requestError instanceof Error ? requestError.message : "Unable to load paper",
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    }
 
-  if (error) {
-    return <main className="center-state"><div><p className="error-message">{error}</p><Link href="/library">返回论文库</Link></div></main>;
+    void initializeReader();
+  }, [handleAuthFailure, loadPaper]);
+
+  useEffect(
+    () => () => {
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (initialAnchorAppliedRef.current || blocks.length === 0) return;
+    initialAnchorAppliedRef.current = true;
+    const requestedBlockId = new URLSearchParams(window.location.search).get("block");
+    const initialBlock =
+      blocks.find((block) => block.id === requestedBlockId) ?? blocks[0];
+    lockSync("restore");
+    setActiveBlockId(initialBlock.id);
+    window.setTimeout(() => {
+      documentRef.current?.scrollToBlock(initialBlock.id, "auto");
+      pdfRef.current?.scrollToBlock(initialBlock.id, "auto");
+    }, 0);
+  }, [blocks]);
+
+  useEffect(() => {
+    if (!activeBlockId) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("block", activeBlockId);
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [activeBlockId]);
+
+  const blocksById = useMemo(
+    () => new Map(blocks.map((block) => [block.id, block])),
+    [blocks],
+  );
+
+  function lockSync(source: SyncSource) {
+    syncSourceRef.current = source;
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(() => {
+      syncSourceRef.current = null;
+    }, 1200);
   }
-  if (!paper) return <main className="center-state">正在加载论文…</main>;
+
+  function syncFromPdf(blockId: string, userInitiated = false) {
+    if (!blocksById.has(blockId)) return;
+    if (!userInitiated && syncSourceRef.current !== null) return;
+    lockSync("pdf");
+    setActiveBlockId(blockId);
+    documentRef.current?.scrollToBlock(blockId);
+  }
+
+  function syncFromDocument(blockId: string, userInitiated = false) {
+    if (!blocksById.has(blockId)) return;
+    if (!userInitiated && syncSourceRef.current !== null) return;
+    lockSync("document");
+    setActiveBlockId(blockId);
+    pdfRef.current?.scrollToBlock(blockId);
+  }
+
+  function selectSection(section: OutlineSection) {
+    const firstBlock =
+      blocks.find((block) => block.section_id === section.id) ??
+      blocks.find((block) => block.page_number === section.start_page);
+    if (!firstBlock) return;
+    lockSync("document");
+    setActiveBlockId(firstBlock.id);
+    documentRef.current?.scrollToBlock(firstBlock.id);
+    pdfRef.current?.scrollToBlock(firstBlock.id);
+  }
+
+  async function parsePaper() {
+    if (!token) return;
+    setIsParsing(true);
+    setError("");
+    setPaper((current) =>
+      current ? { ...current, parse_status: "PROCESSING" } : current,
+    );
+    try {
+      await apiRequest<ParseResult>(
+        `/papers/${paperId}/parse`,
+        { method: "POST" },
+        token,
+      );
+      initialAnchorAppliedRef.current = false;
+      await loadPaper(token);
+    } catch (requestError: unknown) {
+      if (requestError instanceof ApiError && requestError.status === 401) {
+        handleAuthFailure();
+        return;
+      }
+      setPaper((current) =>
+        current ? { ...current, parse_status: "FAILED" } : current,
+      );
+      setError(
+        requestError instanceof Error ? requestError.message : "PDF parsing failed",
+      );
+    } finally {
+      setIsParsing(false);
+    }
+  }
+
+  if (isLoading) {
+    return <main className="center-state">Loading paper reader…</main>;
+  }
+
+  if (!paper) {
+    return (
+      <main className="center-state">
+        <div>
+          <p className="error-message">{error || "Paper not found"}</p>
+          <Link href="/library" className="text-link">
+            Return to Library
+          </Link>
+        </div>
+      </main>
+    );
+  }
+
+  const parseStatus = paper.parse_status;
+  const isCompleted = parseStatus === "COMPLETED";
 
   return (
-    <main className="app-shell narrow-shell">
-      <header className="app-header">
-        <Link href="/library" className="brand">PaperGPT</Link>
-        <Link href="/library" className="secondary-button">返回 Library</Link>
+    <main className={styles.readerShell}>
+      <header className={styles.readerHeader}>
+        <div className={styles.identity}>
+          <Link href="/library" className="brand">
+            PaperGPT
+          </Link>
+          <span aria-hidden="true">/</span>
+          <strong title={paper.original_filename}>
+            {paper.title || paper.original_filename}
+          </strong>
+        </div>
+        <div className={styles.headerActions}>
+          {isCompleted && (
+            <button
+              type="button"
+              className={styles.outlineToggle}
+              onClick={() => setOutlineOpen((open) => !open)}
+            >
+              {outlineOpen ? "Hide outline" : "Outline"}
+            </button>
+          )}
+          <Link href="/library" className="secondary-button">
+            Library
+          </Link>
+        </div>
       </header>
-      <article className="detail-card">
-        <span className="status-badge">{paper.parse_status}</span>
-        <h1>{paper.title || paper.original_filename}</h1>
-        <dl className="detail-list">
-          <div><dt>文件名</dt><dd>{paper.original_filename}</dd></div>
-          <div><dt>上传时间</dt><dd>{new Date(paper.created_at).toLocaleString("zh-CN")}</dd></div>
-          <div><dt>文件大小</dt><dd>{formatBytes(paper.file_size)}</dd></div>
-          <div><dt>文档状态</dt><dd>{paper.parse_status}</dd></div>
-          <div><dt>Paper ID</dt><dd className="mono">{paper.id}</dd></div>
-        </dl>
-        <p className="muted detail-note">Phase 1 仅展示基础元数据，PDF Reader 与内容解析尚未实现。</p>
-      </article>
+
+      {!isCompleted ? (
+        <section className={styles.parseState}>
+          <span className="status-badge">{parseStatus}</span>
+          {parseStatus === "NOT_STARTED" && (
+            <>
+              <h1>This paper has not been parsed</h1>
+              <p>Parse it to create stable document blocks and Reader anchors.</p>
+            </>
+          )}
+          {parseStatus === "PROCESSING" && (
+            <>
+              <h1>Parsing document…</h1>
+              <p>The Reader will open when page layout and blocks are ready.</p>
+            </>
+          )}
+          {parseStatus === "FAILED" && (
+            <>
+              <h1>Parsing failed</h1>
+              <p>{error || "The document engine could not parse this PDF."}</p>
+            </>
+          )}
+          {parseStatus !== "PROCESSING" && (
+            <button
+              type="button"
+              className="primary-button"
+              disabled={isParsing}
+              onClick={() => void parsePaper()}
+            >
+              {isParsing ? "Parsing…" : parseStatus === "FAILED" ? "Parse again" : "Parse PDF"}
+            </button>
+          )}
+        </section>
+      ) : (
+        <>
+          <nav className={styles.modeBar} aria-label="Reader mode">
+            <button
+              type="button"
+              aria-pressed={mode === "split"}
+              onClick={() => setMode("split")}
+            >
+              Side by side
+            </button>
+            <button
+              type="button"
+              aria-pressed={mode === "original"}
+              onClick={() => setMode("original")}
+            >
+              Original
+            </button>
+            <button
+              type="button"
+              aria-pressed={mode === "structured"}
+              onClick={() => setMode("structured")}
+            >
+              Structured
+            </button>
+            <button type="button" disabled title="Translation is planned for Phase 4">
+              Bilingual · Coming later
+            </button>
+            <span className={styles.syncStatus}>
+              {activeBlockId ? `Anchor ${activeBlockId.slice(0, 8)}…` : "No active anchor"}
+            </span>
+          </nav>
+
+          {error && <p className={styles.readerError}>{error}</p>}
+
+          <div
+            className={`${styles.readerWorkspace} ${styles[`mode_${mode}`]} ${
+              outlineOpen ? styles.withOutline : ""
+            }`}
+          >
+            {outlineOpen && (
+              <aside className={styles.outlinePanel} aria-label="Paper outline">
+                <div className={styles.panelTitle}>
+                  <strong>Outline</strong>
+                  <span>{outline.length} top-level</span>
+                </div>
+                <div className={styles.outlineScroller}>
+                  {outline.length > 0 ? (
+                    <Outline sections={outline} onSelect={selectSection} />
+                  ) : (
+                    <p>No sections detected.</p>
+                  )}
+                </div>
+              </aside>
+            )}
+
+            <PdfViewer
+              ref={pdfRef}
+              fileUrl={`${API_BASE_URL}/papers/${paperId}/file`}
+              token={token}
+              blocks={blocks}
+              activeBlockId={activeBlockId}
+              onBlockClick={(blockId) => syncFromPdf(blockId, true)}
+              onVisibleBlockChange={(blockId) => syncFromPdf(blockId)}
+            />
+            <StructuredReader
+              ref={documentRef}
+              blocks={blocks}
+              activeBlockId={activeBlockId}
+              onBlockClick={(blockId) => syncFromDocument(blockId, true)}
+              onVisibleBlockChange={(blockId) => syncFromDocument(blockId)}
+            />
+          </div>
+        </>
+      )}
     </main>
   );
 }

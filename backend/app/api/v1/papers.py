@@ -1,8 +1,20 @@
 import uuid
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
+from starlette.responses import StreamingResponse
 
 from app.api.deps import get_current_user
 from app.core.config import settings
@@ -26,9 +38,11 @@ from app.services.papers import (
     PaperUploadError,
     create_paper,
     delete_paper,
+    get_owned_paper,
     list_papers,
     open_paper,
 )
+from app.services.paper_files import RangeNotSatisfiable, iter_file_bytes, parse_byte_range
 from app.services.storage import LocalStorage
 
 router = APIRouter(prefix="/papers", tags=["papers"])
@@ -139,6 +153,66 @@ def paper_blocks(
     if blocks is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paper not found")
     return [BlockResponse.model_validate(block) for block in blocks]
+
+
+@router.get("/{paper_id}/file")
+def paper_file(
+    paper_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
+) -> StreamingResponse:
+    paper = get_owned_paper(db, current_user, paper_id)
+    if paper is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paper not found")
+
+    file_path = LocalStorage(settings.storage_root).path_for_key(paper.file_key)
+    if not file_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paper file not found")
+
+    file_size = file_path.stat().st_size
+    encoded_filename = quote(paper.original_filename, safe="")
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}",
+    }
+
+    if range_header is None:
+        headers["Content-Length"] = str(file_size)
+        return StreamingResponse(
+            iter_file_bytes(file_path),
+            media_type="application/pdf",
+            headers=headers,
+        )
+
+    try:
+        byte_range = parse_byte_range(range_header, file_size)
+    except RangeNotSatisfiable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_416_RANGE_NOT_SATISFIABLE,
+            detail="Requested range is not satisfiable",
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes */{file_size}",
+            },
+        ) from exc
+
+    headers.update(
+        {
+            "Content-Length": str(byte_range.length),
+            "Content-Range": byte_range.content_range,
+        }
+    )
+    return StreamingResponse(
+        iter_file_bytes(
+            file_path,
+            start=byte_range.start,
+            length=byte_range.length,
+        ),
+        status_code=status.HTTP_206_PARTIAL_CONTENT,
+        media_type="application/pdf",
+        headers=headers,
+    )
 
 
 @router.get("/{paper_id}", response_model=PaperResponse)

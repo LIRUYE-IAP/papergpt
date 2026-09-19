@@ -1,0 +1,532 @@
+.readerShell {
+  display: flex;
+  min-height: 100vh;
+  height: 100vh;
+  flex-direction: column;
+  overflow: hidden;
+  background: #e9ece9;
+}
+
+.readerHeader {
+  display: flex;
+  min-height: 4.25rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid #d7dcd8;
+  background: #fffefa;
+  padding: 0.65rem 1.1rem;
+}
+
+.identity,
+.headerActions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.identity > strong {
+  max-width: min(54vw, 780px);
+  overflow: hidden;
+  color: #45534d;
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outlineToggle {
+  border: 0;
+  background: transparent;
+  color: #205c45;
+  font-weight: 750;
+}
+
+.modeBar {
+  display: flex;
+  min-height: 3.25rem;
+  align-items: center;
+  gap: 0.35rem;
+  border-bottom: 1px solid #d7dcd8;
+  background: #f7f8f5;
+  padding: 0.45rem 1rem;
+}
+
+.modeBar button {
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  background: transparent;
+  padding: 0.48rem 0.72rem;
+  color: #53615b;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.modeBar button[aria-pressed="true"] {
+  border-color: #bcd0c6;
+  background: #e4efe9;
+  color: #174936;
+}
+
+.syncStatus {
+  margin-left: auto;
+  color: #74817b;
+  font-family: monospace;
+  font-size: 0.72rem;
+}
+
+.readerWorkspace {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 1px;
+  background: #cfd5d1;
+}
+
+.readerWorkspace.withOutline {
+  grid-template-columns: 230px minmax(0, 1.2fr) minmax(0, 1fr);
+}
+
+.readerWorkspace.mode_original {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.readerWorkspace.mode_original.withOutline {
+  grid-template-columns: 230px minmax(0, 1fr);
+}
+
+.readerWorkspace.mode_structured {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.readerWorkspace.mode_structured.withOutline {
+  grid-template-columns: 230px minmax(0, 1fr);
+}
+
+.mode_original .documentPanel,
+.mode_structured .pdfPanel {
+  display: none;
+}
+
+.pdfPanel,
+.documentPanel,
+.outlinePanel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  background: #f8f8f5;
+}
+
+.panelTitle {
+  display: flex;
+  min-height: 2.7rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid #dfe3df;
+  background: #fffefa;
+  padding: 0.6rem 0.85rem;
+  font-size: 0.76rem;
+}
+
+.panelTitle strong {
+  letter-spacing: 0.02em;
+}
+
+.panelTitle span {
+  color: #74817b;
+}
+
+.pdfScroller,
+.documentScroller,
+.outlineScroller {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.pdfScroller {
+  background: #59605d;
+  scroll-behavior: smooth;
+}
+
+.pdfPages {
+  display: grid;
+  min-width: 292px;
+  justify-items: center;
+  gap: 1.2rem;
+  padding: 1rem;
+}
+
+.pdfPage {
+  position: relative;
+  max-width: 100%;
+  background: white;
+  box-shadow: 0 7px 24px rgb(0 0 0 / 24%);
+}
+
+.pdfPage canvas {
+  display: block;
+  max-width: 100%;
+}
+
+.pdfOverlay {
+  position: absolute;
+  z-index: 2;
+  min-width: 2px;
+  min-height: 2px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: rgb(35 137 92 / 2%);
+  padding: 0;
+  transition: border-color 120ms ease, background 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.pdfOverlay:hover,
+.pdfOverlay:focus-visible {
+  border-color: rgb(32 92 69 / 65%);
+  background: rgb(51 169 116 / 13%);
+  outline: none;
+}
+
+.pdfOverlayActive {
+  border-color: #ff9f1c;
+  background: rgb(255 178 71 / 24%);
+  box-shadow: 0 0 0 2px rgb(255 159 28 / 18%);
+}
+
+.pageNumber {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.35rem;
+  z-index: 3;
+  border-radius: 99px;
+  background: rgb(22 31 27 / 66%);
+  color: white;
+  padding: 0.16rem 0.42rem;
+  font-size: 0.65rem;
+  pointer-events: none;
+}
+
+.pageError,
+.panelError,
+.readerError {
+  color: #a64035;
+}
+
+.pageError {
+  position: absolute;
+  inset: 1rem;
+  z-index: 4;
+  margin: 0;
+  background: rgb(255 245 243 / 90%);
+  padding: 1rem;
+}
+
+.panelMessage,
+.panelError {
+  margin: 3rem 1rem;
+  text-align: center;
+}
+
+.documentScroller {
+  background: #eceeea;
+  scroll-behavior: smooth;
+}
+
+.documentPage {
+  width: min(760px, calc(100% - 2rem));
+  min-height: calc(100% - 2rem);
+  margin: 1rem auto;
+  background: #fffefa;
+  box-shadow: 0 3px 16px rgb(37 53 45 / 8%);
+  padding: clamp(1.25rem, 4vw, 3.2rem);
+}
+
+.documentBlock {
+  display: block;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #202a26;
+  padding: 0.36rem 0.5rem;
+  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.documentBlock:hover,
+.documentBlock:focus-visible {
+  border-color: #c8d8d0;
+  background: #f3f8f5;
+  outline: none;
+}
+
+.documentBlockActive {
+  border-color: #d88b20;
+  background: #fff7e8;
+  box-shadow: 3px 0 0 #e49a32;
+}
+
+.blockMeta {
+  display: block;
+  margin-bottom: 0.22rem;
+  color: #8a958f;
+  font-size: 0.6rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.blockText {
+  display: block;
+}
+
+.blockTitle {
+  margin: 0 0 1rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.75rem, 4vw, 2.55rem);
+  font-weight: 700;
+  line-height: 1.16;
+}
+
+.blockAuthor {
+  color: #34463e;
+  font-size: 0.98rem;
+  text-align: center;
+}
+
+.blockAffiliation {
+  margin-bottom: 1.1rem;
+  color: #69766f;
+  font-size: 0.82rem;
+  font-style: italic;
+  text-align: center;
+}
+
+.blockAbstract {
+  margin: 1rem 0;
+  border-left: 3px solid #759888;
+  border-radius: 0;
+  background: #f4f7f4;
+  padding: 0.85rem 1rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+
+.blockKeywords {
+  margin-bottom: 1.2rem;
+  color: #526159;
+  font-size: 0.82rem;
+}
+
+.blockHeadingOne,
+.blockHeadingTwo,
+.blockHeadingThree {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.blockHeadingOne {
+  margin-top: 1.6rem;
+  font-size: 1.4rem;
+}
+
+.blockHeadingTwo {
+  margin-top: 1.25rem;
+  font-size: 1.16rem;
+}
+
+.blockHeadingThree {
+  margin-top: 1rem;
+  font-size: 1rem;
+}
+
+.blockParagraph {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.96rem;
+  line-height: 1.72;
+  text-align: justify;
+}
+
+.blockCaption {
+  margin: 0.65rem 0;
+  color: #53615b;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.78rem;
+  font-style: italic;
+  line-height: 1.5;
+}
+
+.blockEquation {
+  margin: 0.8rem 0;
+  font-family: "Times New Roman", serif;
+  font-size: 1.05rem;
+  text-align: center;
+}
+
+.blockFootnote {
+  color: #647169;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.blockReference {
+  padding-left: 1rem;
+  color: #384840;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  text-indent: -0.75rem;
+}
+
+.blockPeripheral {
+  color: #94a09a;
+  font-size: 0.62rem;
+  line-height: 1.35;
+  opacity: 0.68;
+}
+
+.outlineScroller {
+  background: #f7f8f5;
+  padding: 0.8rem 0.65rem 1.5rem;
+}
+
+.outlineList {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.outlineList .outlineList {
+  margin: 0.15rem 0 0.3rem 0.75rem;
+  border-left: 1px solid #d6ddd9;
+  padding-left: 0.45rem;
+}
+
+.outlineList button {
+  width: 100%;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #435149;
+  padding: 0.43rem 0.5rem;
+  font-size: 0.76rem;
+  line-height: 1.35;
+  text-align: left;
+}
+
+.outlineList button:hover,
+.outlineList button:focus-visible {
+  background: #e7eee9;
+  color: #174936;
+  outline: none;
+}
+
+.parseState {
+  width: min(720px, calc(100% - 2rem));
+  margin: auto;
+  border: 1px solid #d7dcd8;
+  border-radius: 1rem;
+  background: #fffefa;
+  padding: clamp(1.5rem, 5vw, 3rem);
+  box-shadow: 0 18px 56px rgb(37 53 45 / 9%);
+}
+
+.parseState h1 {
+  margin: 1rem 0 0.5rem;
+  font-size: clamp(2rem, 5vw, 3.2rem);
+  letter-spacing: -0.045em;
+}
+
+.parseState p {
+  margin: 0 0 1.5rem;
+  color: #66736d;
+  line-height: 1.65;
+}
+
+.readerError {
+  margin: 0;
+  border-bottom: 1px solid #edccc8;
+  background: #fff5f3;
+  padding: 0.6rem 1rem;
+}
+
+@media (max-width: 1050px) {
+  .readerShell {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .readerWorkspace,
+  .readerWorkspace.withOutline,
+  .readerWorkspace.mode_original,
+  .readerWorkspace.mode_original.withOutline,
+  .readerWorkspace.mode_structured,
+  .readerWorkspace.mode_structured.withOutline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .readerWorkspace {
+    min-height: 0;
+    flex: none;
+  }
+
+  .outlinePanel {
+    max-height: 13rem;
+  }
+
+  .pdfPanel,
+  .documentPanel {
+    height: 68vh;
+    min-height: 480px;
+  }
+}
+
+@media (max-width: 680px) {
+  .readerHeader {
+    align-items: flex-start;
+  }
+
+  .identity {
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .identity > span {
+    display: none;
+  }
+
+  .identity > strong {
+    max-width: 55vw;
+  }
+
+  .modeBar {
+    overflow-x: auto;
+  }
+
+  .modeBar button,
+  .syncStatus {
+    flex: 0 0 auto;
+  }
+
+  .syncStatus {
+    display: none;
+  }
+
+  .documentPage {
+    width: 100%;
+    margin: 0;
+    box-shadow: none;
+  }
+}

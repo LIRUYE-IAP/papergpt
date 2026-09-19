@@ -1,26 +1,42 @@
 # PaperGPT Architecture
 
-## Current system — Phase 2
+## Current system — Phase 3
 
 PaperGPT is a modular monolith with an independently runnable Next.js frontend and FastAPI backend.
 
 | Layer | Technology | Current responsibility |
 | --- | --- | --- |
-| Frontend | Next.js App Router | Registration, login, library, upload, and basic paper detail UI |
-| Backend | FastAPI | Versioned Auth, Paper, document-engine, and health APIs |
+| Frontend | Next.js App Router + PDF.js | Registration, login, library, upload, and synchronized PDF/structured Reader |
+| Backend | FastAPI | Versioned Auth, Paper, authenticated PDF delivery, document-engine, and health APIs |
 | Document engine | PyMuPDF + deterministic heuristics | Born-digital page/block extraction, bbox, columns, reading order, classification, sections, and debug JSON |
 | Persistence | SQLAlchemy 2 + Alembic | User, Paper, Section, and Block models with versioned schema changes |
 | Database | PostgreSQL + pgvector | Accounts, paper metadata, sections, and blocks; vector extension reserved for later phases |
-| Cache foundation | Redis | Connectivity only; no Celery tasks or Phase 2 job execution |
+| Cache foundation | Redis | Connectivity only; no Celery tasks or Phase 3 job execution |
 | File storage | Local filesystem abstraction | Original PDFs and generated processing JSON under system-generated keys |
 
 ## Authentication and isolation
 
 - Passwords use pwdlib's recommended Argon2 implementation and are never returned by the API.
 - FastAPI issues HS256 JWT bearer tokens containing `sub` and `exp`; the signing secret comes only from the root `.env`.
-- Paper, parse, outline, and block queries always constrain by the authenticated user ID.
+- Paper, PDF file, parse, outline, and block queries always constrain by the authenticated user ID.
 - Missing and unowned papers have the same not-found response.
 - CORS accepts only the configured `FRONTEND_ORIGIN`, never `*`.
+
+## Reader architecture and Block Anchor Sync
+
+The `/paper/[id]` client loads three owned resources with the same bearer token: Paper state, the nested outline, and globally ordered Blocks. PDF.js receives the original PDF only through `GET /api/v1/papers/{paper_id}/file`; the browser never receives a local filesystem path. The endpoint returns `application/pdf`, advertises byte ranges, and implements one bounded RFC 7233 range per request for PDF.js incremental reads.
+
+The persisted deterministic Block UUID is the only synchronization identity:
+
+```text
+PDF bbox overlay <-> stable Block UUID <-> structured DOM block
+```
+
+Structured nodes use `block-{uuid}` and overlays use `pdf-block-{uuid}`, with `data-block-id={uuid}` on both. No frontend-only content IDs are generated.
+
+PyMuPDF extraction coordinates use a top-left origin and include the matching page width/height. The Reader converts the absolute bbox to normalized coordinates and scales it to each actual rendered PDF.js viewport. Canvas device-pixel scaling is independent of CSS viewport dimensions, so overlays stay aligned when the panel is resized. The Phase 2 limitation for unusual rotated/cropped combinations remains; these layouts require manual verification.
+
+One parent-owned `activeBlockId` drives both active styles. PDF and structured scroll observers choose the visible block nearest the panel center. A debounced, short-lived source lock (`pdf` or `document`) suppresses the reverse observer during programmatic scrolling and prevents feedback loops. Outline navigation resolves the first existing Block belonging to the persisted Section. The URL query `?block={uuid}` stores a refreshable Reader anchor.
 
 ## Document-engine pipeline
 
@@ -36,7 +52,7 @@ PaperGPT is a modular monolith with an independently runnable Next.js frontend a
 10. Only after in-memory parsing succeeds, one database transaction deletes the paper's old parse result and inserts the complete new Section/Block set.
 11. Debug artifacts are first written as a complete hidden staging directory. Directory promotion replaces the prior `processing/` set; a failed promotion restores the prior complete set. PostgreSQL remains authoritative.
 
-Parse failure sets the Paper status to `FAILED`. A parser failure before replacement leaves an existing complete parse result intact; database persistence is transactional. Phase 2 executes synchronously and does not introduce Celery.
+Parse failure sets the Paper status to `FAILED`. A parser failure before replacement leaves an existing complete parse result intact; database persistence is transactional. Parsing remains synchronous in Phase 3 and does not introduce Celery.
 
 PostgreSQL transactions and filesystem renames cannot form one cross-resource ACID transaction. The implementation therefore guarantees complete database replacement and complete debug-artifact sets independently. If filesystem promotion fails after database commit, the old complete artifact set is retained and `parse_status` becomes `FAILED`, explicitly signalling that artifacts do not represent the latest database parse.
 
@@ -97,8 +113,7 @@ Use only a locally supplied PDF that is authorized for testing; never add an unk
 
 ## Explicit future boundaries
 
-- **Phase 3 Reader:** no PDF rendering, block overlay, or reader synchronization UI is implemented.
-- **Translation:** no translated blocks, glossary, provider calls, or translation workflow is implemented.
+- **Phase 4 Translation:** no translated blocks, bilingual content, glossary, provider calls, or translation workflow is implemented. The Bilingual Reader control is disabled and marked as future work.
 - **AI:** no LLM, embedding, RAG, or chat integration is implemented.
 - **Async processing:** Redis is available, but Celery, job queues, progress events, and SSE are not implemented.
 - **OCR:** scanned PDFs are detected only; no OCR pipeline is installed.

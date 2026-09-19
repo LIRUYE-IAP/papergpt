@@ -26,9 +26,62 @@ export type Paper = {
   qa_status: string;
   source_language: string | null;
   target_language: string | null;
+  page_count: number | null;
   created_at: string;
   updated_at: string;
   last_opened_at: string | null;
+};
+
+export type NormalizedBBox = {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+};
+
+export type BlockBBox = NormalizedBBox & {
+  normalized?: NormalizedBBox;
+};
+
+export type DocumentBlock = {
+  id: string;
+  paper_id: string;
+  section_id: string | null;
+  page_number: number;
+  block_type: string;
+  original_text: string;
+  reading_order: number;
+  bbox: BlockBBox;
+  column_index: number | null;
+  parent_block_id: string | null;
+  metadata: Record<string, unknown>;
+  is_translatable: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OutlineSection = {
+  id: string;
+  paper_id: string;
+  parent_id: string | null;
+  title_original: string;
+  title_zh: string | null;
+  level: number;
+  order_index: number;
+  start_page: number;
+  end_page: number;
+  summary: string | null;
+  created_at: string;
+  children: OutlineSection[];
+};
+
+export type ParseResult = {
+  paper_id: string;
+  parse_status: string;
+  page_count: number;
+  section_count: number;
+  block_count: number;
+  is_scanned: boolean;
 };
 
 export class ApiError extends Error {

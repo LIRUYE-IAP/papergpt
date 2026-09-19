@@ -33,9 +33,23 @@
 - Programmatically generated three-page academic-style tests for double columns, headings, captions, repeated marginalia, references, ownership, reparse, failure, and deletion cleanup.
 - Scanned-PDF detection metadata without OCR.
 
-## Phase 3 — Not implemented
+## Phase 3 — Implemented
 
-The PDF Reader, rendered page synchronization, block overlays, and reader interactions have not been implemented and require separate approval.
+- Authenticated, ownership-scoped original-PDF delivery with `application/pdf`, inline disposition, and single byte-range support.
+- PDF.js rendering at `/paper/[id]` without exposing local storage paths.
+- Side-by-side Original PDF and reading-order Structured document panels.
+- Actual per-page bbox-to-rendered-viewport overlay mapping, including resize rerendering.
+- Stable Phase 2 Block UUIDs used directly by PDF overlays, DOM anchors, URL state, and active selection.
+- Right-to-left and left-to-right click navigation.
+- Debounced center-block scroll synchronization with a source lock that prevents feedback loops.
+- Persisted outline navigation to each Section's first available Block.
+- Explicit not-started, processing, failed, completed, and retry Reader states.
+- Original, Structured, and side-by-side modes; Bilingual is disabled and labelled as future work.
+- Desktop-first responsive layout that stacks panels on narrower viewports.
+
+## Phase 4 — Not implemented
+
+Translation and bilingual content are not implemented. No provider or LLM call is made by the Phase 3 Reader.
 
 The following also remain future work:
 

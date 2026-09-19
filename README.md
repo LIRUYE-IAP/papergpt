@@ -1,6 +1,6 @@
 # PaperGPT
 
-PaperGPT Phase 2 provides account authentication, per-user PDF upload and library management, plus a synchronous document engine for born-digital academic PDFs. The backend uses PyMuPDF to retain pages, text blocks, bounding boxes, reading order, columns, and heuristic section structure. Translation, LLMs, RAG, background jobs, and the Phase 3 PDF Reader are not implemented.
+PaperGPT Phase 3 provides account authentication, per-user PDF management, a synchronous born-digital document engine, and a PDF.js Reader synchronized with structured document blocks. The backend uses PyMuPDF to retain pages, text blocks, bounding boxes, reading order, columns, and heuristic section structure. Translation, LLMs, RAG, and background jobs are not implemented.
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ Important local settings include:
 - `FRONTEND_ORIGIN`: the allowed browser origin for CORS
 - `STORAGE_ROOT`: local original-PDF and processing-artifact root
 
-Provider API keys remain empty because Phase 2 makes no AI calls.
+Provider API keys remain empty because Phase 3 makes no AI calls.
 
 ## Backend environment
 
@@ -57,7 +57,7 @@ Set-Location backend
 ..\.venv\Scripts\python.exe -m alembic check
 ```
 
-PostgreSQL/pgvector listens on `localhost:5432`; Redis listens on `localhost:6379`. Both use named Docker volumes. Phase 2 parsing runs synchronously and does not use Redis for task execution.
+PostgreSQL/pgvector listens on `localhost:5432`; Redis listens on `localhost:6379`. Both use named Docker volumes. Phase 3 parsing remains synchronous and does not use Redis for task execution.
 
 ## FastAPI and tests
 
@@ -82,6 +82,7 @@ All paper and document endpoints require `Authorization: Bearer <access_token>`.
 | `POST` | `/api/v1/papers` | Upload one PDF as multipart field `file` |
 | `GET` | `/api/v1/papers` | List the current user's papers |
 | `GET` | `/api/v1/papers/{paper_id}` | Read an owned paper's metadata |
+| `GET` | `/api/v1/papers/{paper_id}/file` | Stream an owned PDF to PDF.js, including single byte ranges |
 | `DELETE` | `/api/v1/papers/{paper_id}` | Delete an owned paper and all stored artifacts |
 | `POST` | `/api/v1/papers/{paper_id}/parse` | Synchronously parse an owned PDF |
 | `GET` | `/api/v1/papers/{paper_id}/outline` | Return the nested section outline |
@@ -90,7 +91,7 @@ All paper and document endpoints require `Authorization: Bearer <access_token>`.
 
 The blocks endpoint supports optional `page`, `section_id`, and `block_type` query filters. Block responses include the block ID, page, type, absolute and normalized bbox, reading order, column, text, section, metadata, and translatability flag.
 
-Ownership is enforced by backend queries. Missing and unowned papers both return `404` from parse, outline, and blocks endpoints.
+Ownership is enforced by backend queries. Missing and unowned papers both return `404` from file, parse, outline, and blocks endpoints. The file endpoint returns `application/pdf`, supports the single-range requests used by PDF.js, and never returns a server filesystem path.
 
 ## PDF validation and storage
 
@@ -192,4 +193,16 @@ Implemented pages remain:
 - `/library`
 - `/paper/[id]`
 
-Phase 2 exposes parsed results through backend outline and blocks APIs for debugging. A formal PDF Reader UI is explicitly deferred to Phase 3.
+`/paper/[id]` is the Phase 3 Reader. It renders the authenticated original PDF through PDF.js beside the ordered structured blocks. The toolbar supports side-by-side, Original, and Structured modes; Bilingual is visibly disabled because Translation is a future phase.
+
+### Reader anchors and synchronization
+
+- Every PDF overlay and structured DOM block uses the persisted Phase 2 Block UUID. Structured nodes use `id="block-{uuid}"` plus `data-block-id`; overlays use `id="pdf-block-{uuid}"` plus the same data attribute.
+- Stored PyMuPDF top-left bboxes are normalized against their matching stored page width/height, then scaled to the actual PDF.js viewport width/height. No scroll-percentage position guessing is used.
+- Clicking a structured block centers its bbox overlay in the PDF panel. Clicking an overlay centers the matching structured block.
+- Normal scrolling selects the visible block closest to the relevant panel's center. A short-lived `pdf`/`document` source lock prevents programmatic scrolling from feeding back into the opposite observer.
+- Outline entries come from the existing outline API and jump to the first persisted block in the selected section.
+- The active anchor is reflected in `?block={uuid}` and restored after refresh when that block still exists.
+- `NOT_STARTED`, `PROCESSING`, `FAILED`, and `COMPLETED` parse states are handled explicitly. Parse/reparse remains synchronous in Phase 3.
+
+The Reader is desktop-first. Narrow viewports stack the outline and reader panels; Original or Structured mode can be used to focus one panel.
