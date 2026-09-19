@@ -22,6 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.document import Block, Section
     from app.models.user import User
 
 
@@ -85,3 +86,13 @@ class Paper(Base):
     last_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="papers")
+    sections: Mapped[list[Section]] = relationship(
+        back_populates="paper",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    blocks: Mapped[list[Block]] = relationship(
+        back_populates="paper",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

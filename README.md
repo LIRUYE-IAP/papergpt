@@ -1,6 +1,6 @@
 # PaperGPT
 
-PaperGPT Phase 1 provides account registration and login, authenticated PDF upload, a per-user paper library, basic paper details, and deletion from both PostgreSQL and local storage. PDF parsing, translation, AI, RAG, background jobs, exports, and commercial features are not implemented.
+PaperGPT Phase 2 provides account authentication, per-user PDF upload and library management, plus a synchronous document engine for born-digital academic PDFs. The backend uses PyMuPDF to retain pages, text blocks, bounding boxes, reading order, columns, and heuristic section structure. Translation, LLMs, RAG, background jobs, and the Phase 3 PDF Reader are not implemented.
 
 ## Prerequisites
 
@@ -16,18 +16,20 @@ From the project root:
 Copy-Item .env.example .env
 ```
 
-Replace the local database password in both `POSTGRES_PASSWORD` and `DATABASE_URL`, and replace `SECRET_KEY` with a random local secret. Do not commit `.env`. Phase 1 also uses:
+Replace the local database password in both `POSTGRES_PASSWORD` and `DATABASE_URL`, and replace `SECRET_KEY` with a random local secret. Do not commit `.env`.
+
+Important local settings include:
 
 - `JWT_EXPIRATION_MINUTES`: access-token lifetime
 - `MAX_PDF_UPLOAD_MB`: PDF upload limit
-- `FRONTEND_ORIGIN`: the single allowed browser origin for CORS
-- `STORAGE_ROOT`: local file-storage root
+- `FRONTEND_ORIGIN`: the allowed browser origin for CORS
+- `STORAGE_ROOT`: local original-PDF and processing-artifact root
 
-Provider API keys remain empty because Phase 1 makes no AI calls.
+Provider API keys remain empty because Phase 2 makes no AI calls.
 
 ## Backend environment
 
-The root `.venv` is the only supported backend development environment. The optional `.python/` directory is uv-managed local tooling, not source code and not the backend environment.
+The root `.venv` is the only supported backend development environment. The optional `.python/` directory is a uv-managed local Python runtime, not project source code and not a second backend environment.
 
 Run from the project root in PowerShell:
 
@@ -40,6 +42,8 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".\backend[dev]"
 .\.venv\Scripts\python.exe --version
 ```
 
+The backend dependency set includes PyMuPDF for born-digital PDF layout extraction. No OCR package is installed.
+
 ## Infrastructure and migration
 
 From the project root:
@@ -50,9 +54,10 @@ docker compose ps
 Set-Location backend
 ..\.venv\Scripts\python.exe -m alembic upgrade head
 ..\.venv\Scripts\python.exe -m alembic current
+..\.venv\Scripts\python.exe -m alembic check
 ```
 
-PostgreSQL/pgvector listens on `localhost:5432`; Redis listens on `localhost:6379`. Both use named Docker volumes.
+PostgreSQL/pgvector listens on `localhost:5432`; Redis listens on `localhost:6379`. Both use named Docker volumes. Phase 2 parsing runs synchronously and does not use Redis for task execution.
 
 ## FastAPI and tests
 
@@ -65,9 +70,9 @@ From `backend/`:
 
 OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
 
-## Phase 1 API
+## API
 
-All paper endpoints require `Authorization: Bearer <access_token>`.
+All paper and document endpoints require `Authorization: Bearer <access_token>`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -77,18 +82,89 @@ All paper endpoints require `Authorization: Bearer <access_token>`.
 | `POST` | `/api/v1/papers` | Upload one PDF as multipart field `file` |
 | `GET` | `/api/v1/papers` | List the current user's papers |
 | `GET` | `/api/v1/papers/{paper_id}` | Read an owned paper's metadata |
-| `DELETE` | `/api/v1/papers/{paper_id}` | Delete an owned paper and stored file |
+| `DELETE` | `/api/v1/papers/{paper_id}` | Delete an owned paper and all stored artifacts |
+| `POST` | `/api/v1/papers/{paper_id}/parse` | Synchronously parse an owned PDF |
+| `GET` | `/api/v1/papers/{paper_id}/outline` | Return the nested section outline |
+| `GET` | `/api/v1/papers/{paper_id}/blocks` | Return ordered blocks and layout debug data |
 | `GET` | `/api/v1/health` | Check API, PostgreSQL, and Redis |
 
-Passwords are Argon2 hashes. JWTs contain the user ID in `sub` and an `exp` claim. Ownership is enforced by backend queries; an unowned paper is returned as not found.
+The blocks endpoint supports optional `page`, `section_id`, and `block_type` query filters. Block responses include the block ID, page, type, absolute and normalized bbox, reading order, column, text, section, metadata, and translatability flag.
 
-Uploaded files are streamed to a system-generated key:
+Ownership is enforced by backend queries. Missing and unowned papers both return `404` from parse, outline, and blocks endpoints.
+
+## PDF validation and storage
+
+Uploads are checked for:
+
+- `.pdf` extension
+- `application/pdf` content type
+- non-empty content
+- configured size limit
+- leading `%PDF-` signature
+
+Original files are streamed to a system-generated key while calculating SHA-256:
 
 ```text
 storage/papers/{user_id}/{paper_id}/original/original.pdf
 ```
 
-Only the object key and metadata are stored in PostgreSQL. The browser-provided filename is retained only as `original_filename` for display.
+Successful parsing also writes inspectable artifacts:
+
+```text
+storage/papers/{user_id}/{paper_id}/processing/raw_pdf_blocks.json
+storage/papers/{user_id}/{paper_id}/processing/layout.json
+storage/papers/{user_id}/{paper_id}/processing/document.json
+```
+
+PostgreSQL `sections` and `blocks` are the formal data source; debug JSON is not used as the database. Reparse replaces prior sections and blocks rather than appending duplicates. Deleting a parsed paper removes both `original/` and `processing/`.
+
+Block and Section IDs are deterministic UUIDv5 values derived from the Paper ID, parser version, and canonical parsed identity. Repeating a parse with the same PDF and parser version preserves Block IDs across PostgreSQL, the blocks API, and `document.json`.
+
+## Document engine scope
+
+The current heuristic pipeline is:
+
+```text
+PDF pages
+→ PyMuPDF spans and text/image blocks
+→ coordinate normalization
+→ repeated header/footer/page-number detection
+→ block classification
+→ column detection
+→ paragraph reconstruction
+→ column-aware reading order
+→ section-tree construction
+→ transactional persistence
+→ debug JSON
+```
+
+Supported block types include titles, authors, affiliations, abstracts, keywords, three heading levels, paragraphs, figures and captions, tables and captions, equations, footnotes, references, headers, footers, and page numbers. Classification is heuristic and does not claim perfect handling of every publisher layout.
+
+Scanned/image-only documents are detected in debug metadata as `is_scanned`; Phase 2 does not run OCR.
+
+### Coordinates
+
+Page width, page height, and extracted bbox values all come from the same PyMuPDF `text-dict` coordinate space. Persisted block metadata includes the matching page dimensions, while each debug page records its page number, rotation, crop box, and coordinate-system label. Absolute bboxes are clamped to the page and zero-area blocks are not persisted.
+
+The current baseline is validated for ordinary unrotated born-digital academic PDFs. Rotation and crop-box metadata are retained, but unusual rotated/cropped-page combinations are not yet normalized with explicit rotation matrices and require manual acceptance review.
+
+## Real-world PDF acceptance checklist
+
+Do not add a third-party or unknown-copyright paper to Git. Use a locally supplied, authorized PDF and manually inspect the outline/blocks APIs and debug JSON for:
+
+- title classification and bbox alignment
+- abstract classification and reading position
+- numbered and unnumbered headings
+- full-page double-column order: left column before right column
+- column-local headings remaining inside their own column flow
+- figure-caption classification
+- table-caption classification
+- References heading and non-translatable reference entries
+- repeated header, footer, and page-number classification
+- absolute bbox alignment against the source page
+- normalized bbox bounds and matching page width/height
+
+The programmatically generated three-page academic fixture remains the automated regression baseline and contains no third-party paper content.
 
 ## Frontend
 
@@ -105,14 +181,15 @@ npm.cmd run dev
 Production verification:
 
 ```powershell
+npm.cmd run lint
 npm.cmd run build
 ```
 
-Implemented pages:
+Implemented pages remain:
 
 - `/register`
 - `/login`
 - `/library`
 - `/paper/[id]`
 
-The Phase 1 browser client stores its bearer token in `localStorage`. No PDF reader, parser, translation progress, or AI experience is present yet.
+Phase 2 exposes parsed results through backend outline and blocks APIs for debugging. A formal PDF Reader UI is explicitly deferred to Phase 3.

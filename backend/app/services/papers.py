@@ -122,16 +122,16 @@ def delete_paper(
     if paper is None:
         return False
 
-    staged_key = storage.stage_delete(paper.file_key)
+    staged_paper = storage.stage_delete_paper(paper.file_key)
     try:
         db.delete(paper)
         db.commit()
     except Exception:
         db.rollback()
-        if staged_key is not None:
-            storage.restore_staged_file(staged_key, paper.file_key)
+        if staged_paper is not None:
+            storage.restore_staged_paper(*staged_paper)
         raise
 
-    if staged_key is not None:
-        storage.delete_file(staged_key)
+    if staged_paper is not None:
+        storage.delete_tree(staged_paper[0])
     return True
