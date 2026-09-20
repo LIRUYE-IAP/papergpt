@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
 
 from app.api.deps import get_current_user
+from app.ai.factory import ProviderConfigurationError
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
@@ -28,6 +29,12 @@ from app.schemas.document import (
     SectionResponse,
 )
 from app.schemas.paper import PaperResponse
+from app.schemas.translation import (
+    BlockTranslationRunResponse,
+    TranslationRequestPayload,
+    TranslationResponse,
+    TranslationRunResponse,
+)
 from app.services.documents import (
     PaperParseError,
     list_owned_blocks,
@@ -44,6 +51,12 @@ from app.services.papers import (
 )
 from app.services.paper_files import RangeNotSatisfiable, iter_file_bytes, parse_byte_range
 from app.services.storage import LocalStorage
+from app.services.translations import (
+    TranslationServiceError,
+    list_owned_translations,
+    translate_owned_block,
+    translate_owned_paper,
+)
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
@@ -153,6 +166,91 @@ def paper_blocks(
     if blocks is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paper not found")
     return [BlockResponse.model_validate(block) for block in blocks]
+
+
+@router.post("/{paper_id}/translate", response_model=TranslationRunResponse)
+def translate_paper(
+    paper_id: uuid.UUID,
+    payload: TranslationRequestPayload,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> TranslationRunResponse:
+    try:
+        result = translate_owned_paper(
+            db,
+            current_user,
+            paper_id,
+            payload.target_language,
+        )
+    except TranslationServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ProviderConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paper not found")
+    return TranslationRunResponse.model_validate(result)
+
+
+@router.get("/{paper_id}/translations", response_model=list[TranslationResponse])
+def paper_translations(
+    paper_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    target_language: Annotated[str | None, Query(min_length=2, max_length=32)] = None,
+    page: Annotated[int | None, Query(ge=1)] = None,
+    section_id: uuid.UUID | None = None,
+) -> list[TranslationResponse]:
+    try:
+        translations = list_owned_translations(
+            db,
+            current_user,
+            paper_id,
+            target_language=target_language,
+            page=page,
+            section_id=section_id,
+        )
+    except TranslationServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    if translations is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paper not found")
+    return [TranslationResponse.model_validate(item) for item in translations]
+
+
+@router.post(
+    "/{paper_id}/blocks/{block_id}/translate",
+    response_model=BlockTranslationRunResponse,
+)
+def translate_block(
+    paper_id: uuid.UUID,
+    block_id: uuid.UUID,
+    payload: TranslationRequestPayload,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> BlockTranslationRunResponse:
+    try:
+        result = translate_owned_block(
+            db,
+            current_user,
+            paper_id,
+            block_id,
+            payload.target_language,
+        )
+    except TranslationServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ProviderConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Paper or block not found",
+        )
+    return BlockTranslationRunResponse.model_validate(result)
 
 
 @router.get("/{paper_id}/file")

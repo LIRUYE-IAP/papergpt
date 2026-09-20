@@ -1,19 +1,21 @@
-from __future__ import annotations
+~from __future__ import annotations
 
 import json
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.models.document import Block, BlockType, Section
 from app.models.paper import Paper
+from app.models.translation import Translation
 from app.models.user import User
 from app.services.document_engine import (
     PARSER_VERSION,
     DocumentEngineError,
     PDFDocumentEngine,
+    ParsedDocument,
 )
 from app.services.papers import get_owned_paper
 from app.services.storage import LocalStorage
@@ -58,6 +60,153 @@ def _set_parse_failed(db: Session, paper_id: uuid.UUID) -> None:
         db.commit()
 
 
+def _section_uuid(
+    paper_id: uuid.UUID,
+    section_data: object,
+) -> uuid.UUID:
+    return _stable_document_uuid(
+        paper_id,
+        "section",
+        {
+            "order_index": section_data.order_index,
+            "level": section_data.level,
+            "title": section_data.title_original,
+            "start_page": section_data.start_page,
+            "end_page": section_data.end_page,
+            "parent_index": section_data.parent_index,
+        },
+    )
+
+
+def _block_uuid(paper_id: uuid.UUID, block_data: object) -> uuid.UUID:
+    return _stable_document_uuid(
+        paper_id,
+        "block",
+        {
+            "reading_order": block_data.reading_order,
+            "page_number": block_data.page_number,
+            "block_type": block_data.block_type.value,
+            "bbox": block_data.bbox(),
+            "column_index": block_data.column_index,
+            "text": block_data.original_text,
+        },
+    )
+
+
+def _reconcile_parsed_document(
+    db: Session,
+    paper: Paper,
+    parsed: ParsedDocument,
+) -> tuple[list[Section], list[Block]]:
+    """Persist a parse without deleting stable Blocks that own translation history."""
+
+    section_ids = [_section_uuid(paper.id, item) for item in parsed.sections]
+    block_ids = [_block_uuid(paper.id, item) for item in parsed.blocks]
+
+    # Detach current relationships in the same transaction before removing obsolete
+    # sections. This prevents a removed parent section from cascading into a section
+    # whose stable UUID is still part of the new parse.
+    db.execute(
+        update(Block)
+        .where(Block.paper_id == paper.id)
+        .values(section_id=None, parent_block_id=None)
+    )
+    db.execute(
+        update(Section).where(Section.paper_id == paper.id).values(parent_id=None)
+    )
+    obsolete_sections = delete(Section).where(Section.paper_id == paper.id)
+    if section_ids:
+        obsolete_sections = obsolete_sections.where(Section.id.not_in(section_ids))
+    db.execute(obsolete_sections)
+    db.flush()
+
+    existing_sections = {
+        section.id: section
+        for section in db.scalars(
+            select(Section).where(Section.paper_id == paper.id)
+        )
+    }
+    section_models: list[Section] = []
+    for section_id, section_data in zip(section_ids, parsed.sections, strict=True):
+        section = existing_sections.get(section_id)
+        if section is None:
+            section = Section(
+                id=section_id,
+                paper_id=paper.id,
+                title_zh=None,
+                summary=None,
+            )
+            db.add(section)
+        section.title_original = section_data.title_original
+        section.level = section_data.level
+        section.order_index = section_data.order_index
+        section.start_page = section_data.start_page
+        section.end_page = section_data.end_page
+        section_models.append(section)
+    db.flush()
+    for section, section_data in zip(section_models, parsed.sections, strict=True):
+        section.parent = (
+            section_models[section_data.parent_index]
+            if section_data.parent_index is not None
+            else None
+        )
+    db.flush()
+
+    existing_blocks = {
+        block.id: block
+        for block in db.scalars(select(Block).where(Block.paper_id == paper.id))
+    }
+    translated_block_ids = set(
+        db.scalars(
+            select(Translation.block_id).where(Translation.paper_id == paper.id)
+        )
+    )
+    current_block_ids = set(block_ids)
+    for block_id, block in existing_blocks.items():
+        if block_id in current_block_ids:
+            continue
+        if block_id in translated_block_ids:
+            metadata = dict(block.block_metadata or {})
+            metadata["papergpt_stale"] = {
+                "reason": "missing_from_latest_parse",
+                "parser_version": PARSER_VERSION,
+            }
+            block.block_metadata = metadata
+            block.is_stale = True
+            block.is_translatable = False
+            block.section = None
+            block.parent_block_id = None
+        else:
+            db.delete(block)
+    db.flush()
+
+    block_models: list[Block] = []
+    for block_id, block_data in zip(block_ids, parsed.blocks, strict=True):
+        block = existing_blocks.get(block_id)
+        section = (
+            section_models[block_data.section_index]
+            if block_data.section_index is not None
+            else None
+        )
+        if block is None:
+            block = Block(id=block_id, paper_id=paper.id)
+            db.add(block)
+        block.section = section
+        block.page_number = block_data.page_number
+        block.block_type = block_data.block_type
+        block.original_text = block_data.original_text
+        block.reading_order = block_data.reading_order
+        block.bbox = block_data.bbox()
+        block.column_index = block_data.column_index
+        block.parent_block_id = None
+        block.block_metadata = dict(block_data.metadata)
+        block.is_translatable = block_data.is_translatable
+        block.is_stale = False
+        block_models.append(block)
+    db.flush()
+    return section_models, block_models
+
+
 def parse_owned_paper(
     db: Session,
     current_user: User,
@@ -84,79 +233,8 @@ def parse_owned_paper(
         _set_parse_failed(db, paper.id)
         raise PaperParseError("PDF parsing failed") from exc
 
-    section_models: list[Section] = []
-    for section_data in parsed.sections:
-        parent = (
-            section_models[section_data.parent_index]
-            if section_data.parent_index is not None
-            else None
-        )
-        section_models.append(
-            Section(
-                id=_stable_document_uuid(
-                    paper.id,
-                    "section",
-                    {
-                        "order_index": section_data.order_index,
-                        "level": section_data.level,
-                        "title": section_data.title_original,
-                        "start_page": section_data.start_page,
-                        "end_page": section_data.end_page,
-                        "parent_index": section_data.parent_index,
-                    },
-                ),
-                paper_id=paper.id,
-                parent=parent,
-                title_original=section_data.title_original,
-                title_zh=None,
-                level=section_data.level,
-                order_index=section_data.order_index,
-                start_page=section_data.start_page,
-                end_page=section_data.end_page,
-                summary=None,
-            )
-        )
-
-    block_models: list[Block] = []
-    for block_data in parsed.blocks:
-        section = (
-            section_models[block_data.section_index]
-            if block_data.section_index is not None
-            else None
-        )
-        block_models.append(
-            Block(
-                id=_stable_document_uuid(
-                    paper.id,
-                    "block",
-                    {
-                        "reading_order": block_data.reading_order,
-                        "page_number": block_data.page_number,
-                        "block_type": block_data.block_type.value,
-                        "bbox": block_data.bbox(),
-                        "column_index": block_data.column_index,
-                        "text": block_data.original_text,
-                    },
-                ),
-                paper_id=paper.id,
-                section=section,
-                page_number=block_data.page_number,
-                block_type=block_data.block_type,
-                original_text=block_data.original_text,
-                reading_order=block_data.reading_order,
-                bbox=block_data.bbox(),
-                column_index=block_data.column_index,
-                parent_block_id=None,
-                block_metadata=block_data.metadata,
-                is_translatable=block_data.is_translatable,
-            )
-        )
-
     try:
-        db.execute(delete(Block).where(Block.paper_id == paper.id))
-        db.execute(delete(Section).where(Section.paper_id == paper.id))
-        db.add_all(section_models)
-        db.add_all(block_models)
+        section_models, block_models = _reconcile_parsed_document(db, paper, parsed)
         paper.page_count = int(parsed.metadata["page_count"])
         if parsed.metadata.get("title"):
             paper.title = str(parsed.metadata["title"])
@@ -244,7 +322,10 @@ def list_owned_blocks(
 ) -> list[Block] | None:
     if get_owned_paper(db, current_user, paper_id) is None:
         return None
-    statement = select(Block).where(Block.paper_id == paper_id)
+    statement = select(Block).where(
+        Block.paper_id == paper_id,
+        Block.is_stale.is_(False),
+    )
     if page is not None:
         statement = statement.where(Block.page_number == page)
     if section_id is not None:

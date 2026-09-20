@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     max_pdf_upload_mb: int = Field(default=20, gt=0, le=1024)
     frontend_origin: str = "http://localhost:3000"
 
+    ai_provider: str = "mock"
     openai_api_key: str | None = None
+    openai_translation_model: str = "gpt-5-mini"
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
 

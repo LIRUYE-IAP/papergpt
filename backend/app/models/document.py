@@ -25,6 +25,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.paper import Paper
+    from app.models.translation import Translation
 
 
 class BlockType(enum.StrEnum):
@@ -105,9 +106,16 @@ class Section(Base):
 class Block(Base):
     __tablename__ = "blocks"
     __table_args__ = (
-        UniqueConstraint("paper_id", "reading_order", name="uq_blocks_paper_order"),
+        Index(
+            "uq_blocks_paper_active_order",
+            "paper_id",
+            "reading_order",
+            unique=True,
+            postgresql_where=text("is_stale = false"),
+        ),
         Index("ix_blocks_paper_page_order", "paper_id", "page_number", "reading_order"),
         Index("ix_blocks_paper_type", "paper_id", "block_type"),
+        Index("ix_blocks_paper_stale", "paper_id", "is_stale"),
         Index("ix_blocks_section", "section_id"),
     )
 
@@ -142,6 +150,9 @@ class Block(Base):
     is_translatable: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true")
     )
+    is_stale: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -156,3 +167,8 @@ class Block(Base):
         remote_side="Block.id",
     )
     child_blocks: Mapped[list[Block]] = relationship(back_populates="parent_block")
+    translations: Mapped[list[Translation]] = relationship(
+        back_populates="block",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

@@ -1,6 +1,6 @@
 # PaperGPT
 
-PaperGPT Phase 3 provides account authentication, per-user PDF management, a synchronous born-digital document engine, and a PDF.js Reader synchronized with structured document blocks. The backend uses PyMuPDF to retain pages, text blocks, bounding boxes, reading order, columns, and heuristic section structure. Translation, LLMs, RAG, and background jobs are not implemented.
+PaperGPT Phase 4A adds a synchronous academic-translation core to the authenticated PDF library, born-digital document engine, and PDF.js Reader. Translations map directly to stable Block UUIDs, preserve version history and protected scientific tokens, and run through a provider abstraction. Phase 4B's polished Chinese/Bilingual Reader, advanced glossary/QA workflows, RAG, chat, and background jobs are not implemented.
 
 ## Prerequisites
 
@@ -24,8 +24,10 @@ Important local settings include:
 - `MAX_PDF_UPLOAD_MB`: PDF upload limit
 - `FRONTEND_ORIGIN`: the allowed browser origin for CORS
 - `STORAGE_ROOT`: local original-PDF and processing-artifact root
+- `AI_PROVIDER`: `mock` by default, or `openai` for the real provider
+- `OPENAI_TRANSLATION_MODEL`: model used only when `AI_PROVIDER=openai`
 
-Provider API keys remain empty because Phase 3 makes no AI calls.
+Local development and all automated tests use the deterministic mock provider and need no API key. To opt into the real provider manually, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_TRANSLATION_MODEL` only in the ignored `.env`; never commit the key.
 
 ## Backend environment
 
@@ -57,7 +59,7 @@ Set-Location backend
 ..\.venv\Scripts\python.exe -m alembic check
 ```
 
-PostgreSQL/pgvector listens on `localhost:5432`; Redis listens on `localhost:6379`. Both use named Docker volumes. Phase 3 parsing remains synchronous and does not use Redis for task execution.
+PostgreSQL/pgvector listens on `localhost:5432`; Redis listens on `localhost:6379`. Both use named Docker volumes. Parsing and Phase 4A translation remain synchronous and do not use Redis for task execution.
 
 ## FastAPI and tests
 
@@ -87,11 +89,28 @@ All paper and document endpoints require `Authorization: Bearer <access_token>`.
 | `POST` | `/api/v1/papers/{paper_id}/parse` | Synchronously parse an owned PDF |
 | `GET` | `/api/v1/papers/{paper_id}/outline` | Return the nested section outline |
 | `GET` | `/api/v1/papers/{paper_id}/blocks` | Return ordered blocks and layout debug data |
+| `POST` | `/api/v1/papers/{paper_id}/translate` | Translate eligible Blocks into `target_language` |
+| `GET` | `/api/v1/papers/{paper_id}/translations` | Return Block-linked translations with optional language/page/section filters |
+| `POST` | `/api/v1/papers/{paper_id}/blocks/{block_id}/translate` | Translate or retranslate one owned Block |
 | `GET` | `/api/v1/health` | Check API, PostgreSQL, and Redis |
 
 The blocks endpoint supports optional `page`, `section_id`, and `block_type` query filters. Block responses include the block ID, page, type, absolute and normalized bbox, reading order, column, text, section, metadata, and translatability flag.
 
-Ownership is enforced by backend queries. Missing and unowned papers both return `404` from file, parse, outline, and blocks endpoints. The file endpoint returns `application/pdf`, supports the single-range requests used by PDF.js, and never returns a server filesystem path.
+Ownership is enforced by backend queries. Missing and unowned papers both return `404` from file, parse, outline, blocks, and translation endpoints. The file endpoint returns `application/pdf`, supports the single-range requests used by PDF.js, and never returns a server filesystem path.
+
+## Academic translation core
+
+Phase 4A translates one persisted Document Block at a time. A request contains the paper title, section title, Block type, previous/current/next translatable text, source/target language, and an empty glossary structure reserved for later work. Only `current_text` is translated; adjacent Blocks are context only.
+
+The default `mock` provider is deterministic and makes no network request. The optional `openai` adapter uses the official Python SDK and Responses API behind the same provider interface. Business services do not import provider SDKs directly.
+
+Automatic translation skips `HEADER`, `FOOTER`, `PAGE_NUMBER`, `REFERENCE`, figure/table body Blocks, equations, and every Block with `is_translatable=false`. Completed and failed records are committed per Block, so one provider failure does not roll back earlier successes. Paper-level responses report `translated_count`, `skipped_count`, and `failed_count`.
+
+Before translation, citations, Figure/Table references, scientific number/unit expressions, selected chemical species, and common statistical symbols are replaced with deterministic placeholders. A translation is accepted only if every placeholder is returned exactly once; otherwise that Block is marked `FAILED`. The original tokens are restored before persistence.
+
+`translations` has one row per `(block_id, target_language)`. Every successful generation appends a `translation_versions` snapshot with an increasing version number. `original_text` is the source snapshot captured when translation begins. A row marked `user_modified=true` is skipped by whole-paper and single-Block automatic translation and is never overwritten without a future explicit force workflow.
+
+Reparse reconciles stable UUIDs instead of deleting every Block. Unchanged Blocks are updated in place, so Translation IDs, version IDs, source snapshots, translated text, and `user_modified` state survive. A newly parsed Block is inserted. A removed Block without translations is deleted; one with translation history is retained as `is_stale=true`, excluded from active Reader/translation queries, and kept with its Translation and TranslationVersion rows for future manual reconciliation.
 
 ## PDF validation and storage
 
@@ -117,7 +136,7 @@ storage/papers/{user_id}/{paper_id}/processing/layout.json
 storage/papers/{user_id}/{paper_id}/processing/document.json
 ```
 
-PostgreSQL `sections` and `blocks` are the formal data source; debug JSON is not used as the database. Reparse replaces prior sections and blocks rather than appending duplicates. Deleting a parsed paper removes both `original/` and `processing/`.
+PostgreSQL `sections` and `blocks` are the formal data source; debug JSON is not used as the database. Reparse reconciles prior sections and blocks rather than appending duplicates or deleting stable translated Blocks. Deleting a parsed paper removes both `original/` and `processing/`.
 
 Block and Section IDs are deterministic UUIDv5 values derived from the Paper ID, parser version, and canonical parsed identity. Repeating a parse with the same PDF and parser version preserves Block IDs across PostgreSQL, the blocks API, and `document.json`.
 
@@ -193,7 +212,7 @@ Implemented pages remain:
 - `/library`
 - `/paper/[id]`
 
-`/paper/[id]` is the Phase 3 Reader. It renders the authenticated original PDF through PDF.js beside the ordered structured blocks. The toolbar supports side-by-side, Original, and Structured modes; Bilingual is visibly disabled because Translation is a future phase.
+`/paper/[id]` is the Phase 3 Reader. It renders the authenticated original PDF through PDF.js beside the ordered structured blocks. Phase 4A exposes translations through the API, but the Bilingual control remains disabled because the polished Chinese/Bilingual Reader belongs to Phase 4B.
 
 ### Reader anchors and synchronization
 

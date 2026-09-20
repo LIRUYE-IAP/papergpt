@@ -1,24 +1,25 @@
 # PaperGPT Architecture
 
-## Current system — Phase 3
+## Current system — Phase 4A
 
 PaperGPT is a modular monolith with an independently runnable Next.js frontend and FastAPI backend.
 
 | Layer | Technology | Current responsibility |
 | --- | --- | --- |
 | Frontend | Next.js App Router + PDF.js | Registration, login, library, upload, and synchronized PDF/structured Reader |
-| Backend | FastAPI | Versioned Auth, Paper, authenticated PDF delivery, document-engine, and health APIs |
+| Backend | FastAPI | Versioned Auth, Paper, PDF delivery, document-engine, translation, and health APIs |
+| Translation core | Provider-neutral services + deterministic mock/OpenAI adapters | Block context, scientific-token protection, academic prompting, persistence, and versioning |
 | Document engine | PyMuPDF + deterministic heuristics | Born-digital page/block extraction, bbox, columns, reading order, classification, sections, and debug JSON |
-| Persistence | SQLAlchemy 2 + Alembic | User, Paper, Section, and Block models with versioned schema changes |
-| Database | PostgreSQL + pgvector | Accounts, paper metadata, sections, and blocks; vector extension reserved for later phases |
-| Cache foundation | Redis | Connectivity only; no Celery tasks or Phase 3 job execution |
+| Persistence | SQLAlchemy 2 + Alembic | User, Paper, Section, Block, Translation, and TranslationVersion models |
+| Database | PostgreSQL + pgvector | Accounts, document structure, Block translations, and history; vector extension reserved for later phases |
+| Cache foundation | Redis | Connectivity only; no Celery tasks or Phase 4A job execution |
 | File storage | Local filesystem abstraction | Original PDFs and generated processing JSON under system-generated keys |
 
 ## Authentication and isolation
 
 - Passwords use pwdlib's recommended Argon2 implementation and are never returned by the API.
 - FastAPI issues HS256 JWT bearer tokens containing `sub` and `exp`; the signing secret comes only from the root `.env`.
-- Paper, PDF file, parse, outline, and block queries always constrain by the authenticated user ID.
+- Paper, PDF file, parse, outline, Block, and translation queries always constrain by the authenticated user ID.
 - Missing and unowned papers have the same not-found response.
 - CORS accepts only the configured `FRONTEND_ORIGIN`, never `*`.
 
@@ -38,6 +39,27 @@ PyMuPDF extraction coordinates use a top-left origin and include the matching pa
 
 One parent-owned `activeBlockId` drives both active styles. PDF and structured scroll observers choose the visible block nearest the panel center. A debounced, short-lived source lock (`pdf` or `document`) suppresses the reverse observer during programmatic scrolling and prevents feedback loops. Outline navigation resolves the first existing Block belonging to the persisted Section. The URL query `?block={uuid}` stores a refreshable Reader anchor.
 
+## Academic translation pipeline
+
+```text
+stable Document Block
+-> document/section/local context
+-> protected scientific placeholders
+-> provider-neutral TranslationRequest
+-> mock or OpenAI provider
+-> strict placeholder restoration
+-> Translation + immutable TranslationVersion
+-> Block-linked Reader API
+```
+
+The context builder selects the previous and next eligible Blocks in global reading order. Those Blocks help resolve terminology but the academic prompt explicitly requests output for the current Block only. The serialized prompt input is delimited JSON labelled as untrusted source-document data; commands embedded in any document field cannot redefine the system/developer translation task. Header/footer/page-number/reference Blocks, stale or non-translatable Blocks, figure/table bodies, and equations are conservatively skipped.
+
+Provider code lives under `app.ai.providers`; translation business logic depends only on the abstract interface. `AI_PROVIDER=mock` is the zero-cost default. `AI_PROVIDER=openai` constructs the official Python SDK only after ownership and parsed-state checks, and requires an environment-provided key and model. The OpenAI adapter uses a stateless Responses API request with `store=False`. Tests never invoke it.
+
+Token preprocessing protects citations, Figure/Table references, number-unit expressions, selected atmospheric chemical species, and statistical notation. Placeholders use a deterministic source-derived namespace and a per-occurrence index, so repeated equal tokens remain independently restorable without colliding with ordinary document text. Restoration requires each placeholder exactly once, so a provider cannot silently drop, duplicate, or alter a protected scientific value.
+
+Each `(block_id, target_language)` has one current Translation. Every successful initial translation or retranslation appends a monotonically numbered TranslationVersion. Failed Blocks retain `FAILED` and `error_message`; successful Blocks are committed independently. `user_modified=true` is an unconditional automatic-translation skip in Phase 4A.
+
 ## Document-engine pipeline
 
 1. The API resolves an owned Paper and changes `parse_status` from `NOT_STARTED` or its prior state to `PROCESSING`.
@@ -49,10 +71,10 @@ One parent-owned `activeBlockId` drives both active styles. PDF and structured s
 7. Adjacent compatible text blocks are reconstructed using column, font, font-size, indentation, and vertical-gap checks. Conservative line-end hyphen repair removes splits such as `fore-` + `casting`.
 8. Heading levels build a parent/child section tree. Blocks retain their page, bbox, section, column, and globally unique reading order.
 9. Block and Section primary keys are deterministic UUIDv5 anchors derived from the Paper UUID, parser version, and canonical layout identity. An unchanged parse preserves IDs for future reader, translation, note, and citation references.
-10. Only after in-memory parsing succeeds, one database transaction deletes the paper's old parse result and inserts the complete new Section/Block set.
+10. Only after in-memory parsing succeeds, one database transaction reconciles stable Section/Block UUIDs. Unchanged rows are updated in place, new rows are inserted, untranslated removed rows are deleted, and translated removed rows are retained as stale history.
 11. Debug artifacts are first written as a complete hidden staging directory. Directory promotion replaces the prior `processing/` set; a failed promotion restores the prior complete set. PostgreSQL remains authoritative.
 
-Parse failure sets the Paper status to `FAILED`. A parser failure before replacement leaves an existing complete parse result intact; database persistence is transactional. Parsing remains synchronous in Phase 3 and does not introduce Celery.
+Parse failure sets the Paper status to `FAILED`. A parser failure before replacement leaves an existing complete parse result intact; database persistence is transactional. Parsing and translation remain synchronous in Phase 4A and do not introduce Celery.
 
 PostgreSQL transactions and filesystem renames cannot form one cross-resource ACID transaction. The implementation therefore guarantees complete database replacement and complete debug-artifact sets independently. If filesystem promotion fails after database commit, the old complete artifact set is retained and `parse_status` becomes `FAILED`, explicitly signalling that artifacts do not represent the latest database parse.
 
@@ -68,10 +90,12 @@ PostgreSQL transactions and filesystem renames cannot form one cross-resource AC
 - absolute and normalized bbox JSON
 - column index
 - extraction metadata
-- translatability flag
+- translatability and stale-history flags
 - timestamps
 
-Foreign keys cascade from Paper. Reparse safely replaces child records, and Paper deletion stages and removes the complete storage subtree, including processing artifacts.
+Foreign keys cascade from Paper. Reparse never deletes an unchanged stable Block. Removed Blocks with no Translation can be deleted; removed or changed Blocks with Translation history remain in the database as `is_stale=true` and are excluded from active Reader queries. Paper deletion is the explicit destructive boundary and removes all related database rows plus the complete storage subtree.
+
+`Translation` belongs to one Paper and one stable Block, is unique by `(block_id, target_language)`, and stores the source snapshot captured at translation time, current translated text, provider/model, status, QA placeholder, timestamps, user-modified protection, and failure message. `TranslationVersion` belongs to a Translation and preserves each successful generated text with provider/model, version number, creation time, and reason. Explicit Paper deletion cascades through both translation tables; parse reconciliation protects translated Blocks from that cascade.
 
 ## Storage layout
 
@@ -113,8 +137,9 @@ Use only a locally supplied PDF that is authorized for testing; never add an unk
 
 ## Explicit future boundaries
 
-- **Phase 4 Translation:** no translated blocks, bilingual content, glossary, provider calls, or translation workflow is implemented. The Bilingual Reader control is disabled and marked as future work.
-- **AI:** no LLM, embedding, RAG, or chat integration is implemented.
+- **Phase 4B Reader:** polished Chinese/Bilingual display, editing UI, advanced glossary workflow, and translation QA remain unimplemented. The Bilingual Reader control stays disabled.
+- **Reparse reconciliation UI:** removed/changed translated Blocks are safely retained as stale history, but Phase 4A has no UI or automatic semantic mapping for reconciling that history with a new Block UUID.
+- **AI beyond translation:** no embedding, retrieval, RAG, or AI chat integration is implemented.
 - **Async processing:** Redis is available, but Celery, job queues, progress events, and SSE are not implemented.
 - **OCR:** scanned PDFs are detected only; no OCR pipeline is installed.
 - **Export and commercial features:** Word export, memberships, plans, and payments remain future work.

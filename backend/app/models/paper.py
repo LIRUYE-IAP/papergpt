@@ -23,6 +23,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.document import Block, Section
+    from app.models.translation import Translation
     from app.models.user import User
 
 
@@ -92,6 +93,11 @@ class Paper(Base):
         passive_deletes=True,
     )
     blocks: Mapped[list[Block]] = relationship(
+        back_populates="paper",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    translations: Mapped[list[Translation]] = relationship(
         back_populates="paper",
         cascade="all, delete-orphan",
         passive_deletes=True,

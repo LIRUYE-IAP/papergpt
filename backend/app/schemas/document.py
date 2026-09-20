@@ -42,6 +42,7 @@ class BlockResponse(BaseModel):
     parent_block_id: uuid.UUID | None
     metadata: dict[str, Any] = Field(validation_alias="block_metadata")
     is_translatable: bool
+    is_stale: bool
     created_at: datetime
     updated_at: datetime
 

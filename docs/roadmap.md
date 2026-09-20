@@ -24,7 +24,7 @@
 - Geometry-aware column-local headings that remain in their owning column flow.
 - Paragraph reconstruction with layout/style checks and conservative English line-end dehyphenation.
 - Hierarchical section detection without LLM calls.
-- Transactional reparse that replaces old results and avoids duplicate blocks.
+- Transactional reparse reconciliation that avoids duplicate active blocks.
 - Stable deterministic Block/Section UUID anchors across unchanged reparses.
 - Paper parse states: `NOT_STARTED`, `PROCESSING`, `COMPLETED`, and `FAILED`.
 - Authenticated parse, outline, and filterable block APIs.
@@ -47,14 +47,31 @@
 - Original, Structured, and side-by-side modes; Bilingual is disabled and labelled as future work.
 - Desktop-first responsive layout that stacks panels on narrower viewports.
 
-## Phase 4 — Not implemented
+## Phase 4A — Implemented
 
-Translation and bilingual content are not implemented. No provider or LLM call is made by the Phase 3 Reader.
+- Translation and TranslationVersion tables keyed directly to stable Block UUIDs.
+- Unique `(block_id, target_language)` current translations with per-success version history.
+- Provider-neutral translation interface, deterministic mock provider, and optional real OpenAI Responses API adapter.
+- Paper, section, and previous/current/next Block context construction.
+- Independent academic prompt that preserves meaning, causality, negation, and uncertainty.
+- Placeholder protection and strict restoration for citations, Figure/Table references, scientific units, selected chemical species, and statistical notation.
+- Synchronous whole-paper and single-Block translation APIs with ownership checks.
+- Language, page, and section filters for Block-linked translation retrieval.
+- Per-Block failure persistence and translated/skipped/failed counts without rolling back earlier successes.
+- Automatic protection of `user_modified=true` translations.
+- Stable-UUID reparse reconciliation that preserves unchanged Translation IDs, version history, source snapshots, translated text, and `user_modified` state.
+- Conservative stale-history retention when a translated Block disappears or changes identity.
+- Explicit untrusted-document prompt boundary and collision-safe, per-occurrence protected-token placeholders.
+- Mock-provider persistence, mapping, context, protected-token, prompt-boundary, failure, retranslation, reparse, version, and ownership tests.
+
+## Phase 4B — Not implemented
+
+The polished Chinese/Bilingual Reader, translation editing UI, advanced glossary workflow, and translation QA workflow remain future work.
 
 The following also remain future work:
 
-- Translation and glossary workflows
-- LLM provider integrations
+- Advanced glossary and translation-QA workflows
+- Additional provider adapters beyond the Phase 4A OpenAI boundary
 - Embeddings, retrieval, RAG, and AI chat
 - Celery, asynchronous parsing, progress events, and SSE
 - OCR
