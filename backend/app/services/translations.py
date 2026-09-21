@@ -1,11 +1,13 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import logging
 import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai.factory import get_translation_provider
+from app.ai.errors import TranslationExecutionError, TranslationFailedError
 from app.ai.providers import TranslationProvider
 from app.models.document import Block
 from app.models.paper import Paper
@@ -35,16 +37,38 @@ class TranslationServiceError(RuntimeError):
         self.status_code = status_code
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class TranslationRunResult:
     translated_count: int
     skipped_count: int
     failed_count: int
+    remaining_count: int = 0
 
 
 @dataclass(frozen=True)
 class BlockTranslationRunResult(TranslationRunResult):
-    translation: Translation | None
+    translation: Translation | None = None
+
+
+@dataclass(frozen=True)
+class BlockTranslationOutcome:
+    succeeded: bool
+    translation: Translation
+    error: TranslationExecutionError | None = None
+
+
+class TranslationRunInterrupted(RuntimeError):
+    def __init__(
+        self,
+        error: TranslationExecutionError,
+        result: TranslationRunResult,
+    ) -> None:
+        super().__init__(error.safe_message)
+        self.error = error
+        self.result = result
 
 
 def normalize_language_tag(language: str) -> str:
@@ -87,7 +111,7 @@ def _translate_block(
     block: Block,
     target_language: str,
     provider: TranslationProvider,
-) -> tuple[bool, Translation]:
+) -> BlockTranslationOutcome:
     translation = _existing_translation(
         db,
         block_id=block.id,
@@ -156,17 +180,36 @@ def _translate_block(
         replace_translation_qa(db, translation)
         db.commit()
         db.refresh(translation)
-        return True, translation
-    except Exception as exc:
+        return BlockTranslationOutcome(True, translation)
+    except TranslationExecutionError as exc:
+        failure = exc
+    except Exception:
+        failure = TranslationFailedError()
+
+    try:
         db.rollback()
         failed_translation = db.get(Translation, translation.id)
         if failed_translation is None:
-            raise
+            raise failure
         failed_translation.status = TranslationStatus.FAILED
-        failed_translation.error_message = str(exc)[:2000] or exc.__class__.__name__
+        failed_translation.error_message = failure.safe_message
         db.commit()
         db.refresh(failed_translation)
-        return False, failed_translation
+    except Exception:
+        db.rollback()
+        raise
+
+    logger.warning(
+        "translation_failed category=%s provider=%s model=%s paper_id=%s "
+        "block_id=%s provider_status=%s",
+        failure.code,
+        provider.name,
+        provider.model,
+        paper.id,
+        block.id,
+        failure.provider_status,
+    )
+    return BlockTranslationOutcome(False, failed_translation, failure)
 
 
 def translate_owned_paper(
@@ -197,9 +240,8 @@ def translate_owned_paper(
     paper.target_language = normalized_target
     db.commit()
 
-    translated_count = 0
+    translatable_blocks: list[Block] = []
     skipped_count = 0
-    failed_count = 0
     for block in blocks:
         if not is_translation_candidate(block):
             skipped_count += 1
@@ -212,17 +254,36 @@ def translate_owned_paper(
         if existing is not None and existing.user_modified:
             skipped_count += 1
             continue
-        succeeded, _ = _translate_block(
+        translatable_blocks.append(block)
+
+    translated_count = 0
+    failed_count = 0
+    for index, block in enumerate(translatable_blocks):
+        outcome = _translate_block(
             db,
             paper=paper,
             block=block,
             target_language=normalized_target,
             provider=active_provider,
         )
-        if succeeded:
+        if outcome.succeeded:
             translated_count += 1
         else:
             failed_count += 1
+            if outcome.error is not None and outcome.error.stop_batch:
+                paper = db.get(Paper, paper.id)
+                if paper is not None:
+                    paper.translation_status = TranslationStatus.FAILED.value
+                    db.commit()
+                raise TranslationRunInterrupted(
+                    outcome.error,
+                    TranslationRunResult(
+                        translated_count=translated_count,
+                        skipped_count=skipped_count,
+                        failed_count=failed_count,
+                        remaining_count=len(translatable_blocks) - index - 1,
+                    ),
+                )
 
     paper = db.get(Paper, paper.id)
     if paper is not None:
@@ -274,7 +335,7 @@ def translate_owned_block(
             translation=existing,
         )
 
-    succeeded, translation = _translate_block(
+    outcome = _translate_block(
         db,
         paper=paper,
         block=block,
@@ -283,16 +344,18 @@ def translate_owned_block(
     )
     paper.translation_status = (
         TranslationStatus.COMPLETED.value
-        if succeeded
+        if outcome.succeeded
         else TranslationStatus.FAILED.value
     )
     paper.target_language = normalized_target
     db.commit()
+    if outcome.error is not None:
+        raise outcome.error
     return BlockTranslationRunResult(
-        translated_count=1 if succeeded else 0,
+        translated_count=1 if outcome.succeeded else 0,
         skipped_count=0,
-        failed_count=0 if succeeded else 1,
-        translation=translation,
+        failed_count=0 if outcome.succeeded else 1,
+        translation=outcome.translation,
     )
 
 

@@ -51,10 +51,29 @@ class TranslationRunResponse(BaseModel):
     translated_count: int
     skipped_count: int
     failed_count: int
+    remaining_count: int = 0
 
 
 class BlockTranslationRunResponse(TranslationRunResponse):
     translation: TranslationResponse | None
+
+
+class TranslationPartialResult(BaseModel):
+    translated_count: int
+    skipped_count: int
+    failed_count: int
+    remaining_count: int
+
+
+class TranslationErrorDetail(BaseModel):
+    code: str
+    message: str
+    retry_after_seconds: int | None = None
+    partial_result: TranslationPartialResult | None = None
+
+
+class TranslationErrorResponse(BaseModel):
+    error: TranslationErrorDetail
 
 
 class TranslationEditPayload(BaseModel):

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     ai_provider: str = "mock"
     openai_api_key: str | None = None
     openai_translation_model: str = "gpt-5-mini"
+    papergpt_test_ai_failure: str | None = None
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
 

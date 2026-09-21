@@ -14,10 +14,11 @@ from fastapi import (
     status,
 )
 from sqlalchemy.orm import Session
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from app.api.deps import get_current_user
 from app.ai.factory import ProviderConfigurationError
+from app.ai.errors import TranslationExecutionError
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.translation import Translation
@@ -33,6 +34,9 @@ from app.schemas.paper import PaperResponse
 from app.schemas.translation import (
     BlockTranslationRunResponse,
     TranslationEditPayload,
+    TranslationErrorDetail,
+    TranslationErrorResponse,
+    TranslationPartialResult,
     TranslationQAResponse,
     TranslationQAResultResponse,
     TranslationRequestPayload,
@@ -58,6 +62,7 @@ from app.services.paper_files import RangeNotSatisfiable, iter_file_bytes, parse
 from app.services.storage import LocalStorage
 from app.services.translations import (
     TranslationServiceError,
+    TranslationRunInterrupted,
     edit_owned_translation,
     list_owned_translation_versions,
     list_owned_translations,
@@ -70,6 +75,25 @@ from app.services.translation_qa import (
 )
 
 router = APIRouter(prefix="/papers", tags=["papers"])
+
+
+def _translation_error_response(
+    error: TranslationExecutionError,
+    *,
+    partial_result: TranslationPartialResult | None = None,
+) -> JSONResponse:
+    payload = TranslationErrorResponse(
+        error=TranslationErrorDetail(
+            code=error.code,
+            message=error.safe_message,
+            retry_after_seconds=error.retry_after_seconds,
+            partial_result=partial_result,
+        )
+    )
+    return JSONResponse(
+        status_code=error.http_status,
+        content=payload.model_dump(mode="json"),
+    )
 
 
 def _outline_response(sections: list) -> list[SectionOutlineResponse]:
@@ -185,7 +209,7 @@ def translate_paper(
     payload: TranslationRequestPayload,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
-) -> TranslationRunResponse:
+) -> TranslationRunResponse | JSONResponse:
     try:
         result = translate_owned_paper(
             db,
@@ -195,11 +219,20 @@ def translate_paper(
         )
     except TranslationServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except TranslationRunInterrupted as exc:
+        return _translation_error_response(
+            exc.error,
+            partial_result=TranslationPartialResult(
+                translated_count=exc.result.translated_count,
+                skipped_count=exc.result.skipped_count,
+                failed_count=exc.result.failed_count,
+                remaining_count=exc.result.remaining_count,
+            ),
+        )
+    except TranslationExecutionError as exc:
+        return _translation_error_response(exc)
     except ProviderConfigurationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
+        return _translation_error_response(exc.error)
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paper not found")
     return TranslationRunResponse.model_validate(result)
@@ -240,7 +273,7 @@ def translate_block(
     payload: TranslationRequestPayload,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
-) -> BlockTranslationRunResponse:
+) -> BlockTranslationRunResponse | JSONResponse:
     try:
         result = translate_owned_block(
             db,
@@ -251,11 +284,10 @@ def translate_block(
         )
     except TranslationServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except TranslationExecutionError as exc:
+        return _translation_error_response(exc)
     except ProviderConfigurationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
+        return _translation_error_response(exc.error)
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

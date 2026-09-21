@@ -48,6 +48,9 @@ def isolated_test_data(
 ) -> Generator[None, None, None]:
     remove_test_users()
     monkeypatch.setattr(settings, "storage_root", tmp_path)
+    monkeypatch.setattr(settings, "ai_provider", "mock")
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    monkeypatch.setattr(settings, "papergpt_test_ai_failure", None)
     yield
     remove_test_users()
 
