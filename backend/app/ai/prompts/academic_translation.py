@@ -20,6 +20,8 @@ Requirements:
   suggest, indicate, and likely must not become categorical claims.
 - Preserve every protected placeholder exactly, character for character.
 - Preserve Figure, Table, citation, equation, variable, and scientific references.
+- Treat glossary entries as mandatory terminology for matching source terms. Paper
+  entries have already overridden conflicting user-global entries.
 - Produce only the translated CURRENT_BLOCK, with no commentary or labels.
 - For Chinese targets, use accurate, faithful, formal academic Chinese.
 """

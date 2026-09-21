@@ -64,13 +64,23 @@
 - Explicit untrusted-document prompt boundary and collision-safe, per-occurrence protected-token placeholders.
 - Mock-provider persistence, mapping, context, protected-token, prompt-boundary, failure, retranslation, reparse, version, and ownership tests.
 
-## Phase 4B — Not implemented
+## Phase 4B — Implemented
 
-The polished Chinese/Bilingual Reader, translation editing UI, advanced glossary workflow, and translation QA workflow remain future work.
+- Paper and User-global glossary terms with backend ownership isolation and Paper-over-global precedence.
+- Case-sensitive/insensitive, word-boundary, longest-term context matching without source pre-replacement.
+- Context-bounded glossary injection into deterministic mock translation prompts.
+- Per-check deterministic QA result persistence and deterministic `FAILED`/`WARNING`/`PASSED` aggregation.
+- Numeric, unit, citation, Figure/Table, chemical-species, statistics, completeness, glossary, uncertainty, placeholder, and suspicious-output checks.
+- QA read/rerun APIs whose reruns replace the current issue set.
+- Non-empty manual translation editing with `user_modified=true` and immutable monotonic `USER_EDIT` versions.
+- Version-history API with backend ownership enforcement.
+- Chinese and Bilingual Reader modes using the same stable Block UUID anchors and PDF bbox synchronization.
+- Translate Paper/Block, edit, QA issue detail, modified badge, missing translation, and minimal glossary CRUD controls.
+- Active/stale boundaries that keep historical translations but exclude them from current Reader and mutation APIs.
+- Reparse preservation of unchanged manually edited translations and Block mappings.
 
 The following also remain future work:
 
-- Advanced glossary and translation-QA workflows
 - Additional provider adapters beyond the Phase 4A OpenAI boundary
 - Embeddings, retrieval, RAG, and AI chat
 - Celery, asynchronous parsing, progress events, and SSE

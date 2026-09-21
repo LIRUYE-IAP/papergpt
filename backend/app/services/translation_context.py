@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.ai.types import TranslationRequest
 from app.models.document import Block, BlockType
 from app.models.paper import Paper
+from app.services.glossary import relevant_glossary
 
 _SKIPPED_BLOCK_TYPES = {
     BlockType.HEADER,
@@ -58,6 +59,14 @@ def build_translation_context(
         else None
     )
     section_title = block.section.title_original if block.section is not None else None
+    glossary = relevant_glossary(
+        db,
+        user_id=paper.user_id,
+        paper_id=paper.id,
+        source_language=paper.source_language or "auto",
+        target_language=target_language,
+        texts=[previous_text, block.original_text, next_text],
+    )
     return TranslationRequest(
         paper_title=paper.title or paper.original_filename,
         section_title=section_title,
@@ -67,7 +76,7 @@ def build_translation_context(
         next_text=next_text,
         source_language=paper.source_language or "auto",
         target_language=target_language,
-        glossary={},
+        glossary=glossary,
     )
 
 

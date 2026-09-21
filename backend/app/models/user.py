@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.glossary import GlossaryTerm
     from app.models.paper import Paper
 
 
@@ -31,6 +32,11 @@ class User(Base):
     )
 
     papers: Mapped[list[Paper]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    glossary_terms: Mapped[list[GlossaryTerm]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,

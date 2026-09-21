@@ -21,6 +21,11 @@ from app.services.translation_context import (
     get_owned_block,
     is_translation_candidate,
 )
+from app.services.translation_qa import (
+    QA_PENDING,
+    get_owned_active_translation,
+    replace_translation_qa,
+)
 
 
 class TranslationServiceError(RuntimeError):
@@ -148,6 +153,7 @@ def _translate_block(
         translation.status = TranslationStatus.COMPLETED
         translation.translated_at = datetime.now(timezone.utc)
         translation.error_message = None
+        replace_translation_qa(db, translation)
         db.commit()
         db.refresh(translation)
         return True, translation
@@ -316,3 +322,61 @@ def list_owned_translations(
     if section_id is not None:
         statement = statement.where(Block.section_id == section_id)
     return list(db.scalars(statement))
+
+
+def edit_owned_translation(
+    db: Session,
+    current_user: User,
+    paper_id: uuid.UUID,
+    translation_id: uuid.UUID,
+    translated_text: str,
+) -> Translation | None:
+    translation = get_owned_active_translation(
+        db, current_user, paper_id, translation_id
+    )
+    if translation is None:
+        return None
+    version_number = _next_version_number(db, translation.id)
+    db.add(
+        TranslationVersion(
+            translation_id=translation.id,
+            translated_text=translated_text,
+            provider="user",
+            model="manual-edit",
+            version_number=version_number,
+            reason="USER_EDIT",
+        )
+    )
+    translation.translated_text = translated_text
+    translation.provider = "user"
+    translation.model = "manual-edit"
+    translation.user_modified = True
+    translation.status = TranslationStatus.COMPLETED
+    translation.qa_status = QA_PENDING
+    translation.error_message = None
+    translation.translated_at = datetime.now(timezone.utc)
+    db.flush()
+    replace_translation_qa(db, translation)
+    db.commit()
+    db.refresh(translation)
+    return translation
+
+
+def list_owned_translation_versions(
+    db: Session,
+    current_user: User,
+    paper_id: uuid.UUID,
+    translation_id: uuid.UUID,
+) -> list[TranslationVersion] | None:
+    translation = get_owned_active_translation(
+        db, current_user, paper_id, translation_id
+    )
+    if translation is None:
+        return None
+    return list(
+        db.scalars(
+            select(TranslationVersion)
+            .where(TranslationVersion.translation_id == translation.id)
+            .order_by(TranslationVersion.version_number)
+        )
+    )

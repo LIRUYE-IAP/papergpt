@@ -20,6 +20,7 @@ from app.api.deps import get_current_user
 from app.ai.factory import ProviderConfigurationError
 from app.core.config import settings
 from app.db.session import get_db
+from app.models.translation import Translation
 from app.models.user import User
 from app.models.document import BlockType
 from app.schemas.document import (
@@ -31,9 +32,13 @@ from app.schemas.document import (
 from app.schemas.paper import PaperResponse
 from app.schemas.translation import (
     BlockTranslationRunResponse,
+    TranslationEditPayload,
+    TranslationQAResponse,
+    TranslationQAResultResponse,
     TranslationRequestPayload,
     TranslationResponse,
     TranslationRunResponse,
+    TranslationVersionResponse,
 )
 from app.services.documents import (
     PaperParseError,
@@ -53,9 +58,15 @@ from app.services.paper_files import RangeNotSatisfiable, iter_file_bytes, parse
 from app.services.storage import LocalStorage
 from app.services.translations import (
     TranslationServiceError,
+    edit_owned_translation,
+    list_owned_translation_versions,
     list_owned_translations,
     translate_owned_block,
     translate_owned_paper,
+)
+from app.services.translation_qa import (
+    get_owned_active_translation,
+    rerun_owned_translation_qa,
 )
 
 router = APIRouter(prefix="/papers", tags=["papers"])
@@ -251,6 +262,106 @@ def translate_block(
             detail="Paper or block not found",
         )
     return BlockTranslationRunResponse.model_validate(result)
+
+
+@router.patch(
+    "/{paper_id}/translations/{translation_id}",
+    response_model=TranslationResponse,
+)
+def edit_translation(
+    paper_id: uuid.UUID,
+    translation_id: uuid.UUID,
+    payload: TranslationEditPayload,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> TranslationResponse:
+    translation = edit_owned_translation(
+        db,
+        current_user,
+        paper_id,
+        translation_id,
+        payload.translated_text,
+    )
+    if translation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Translation not found",
+        )
+    return TranslationResponse.model_validate(translation)
+
+
+@router.get(
+    "/{paper_id}/translations/{translation_id}/versions",
+    response_model=list[TranslationVersionResponse],
+)
+def translation_versions(
+    paper_id: uuid.UUID,
+    translation_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[TranslationVersionResponse]:
+    versions = list_owned_translation_versions(
+        db, current_user, paper_id, translation_id
+    )
+    if versions is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Translation not found",
+        )
+    return [TranslationVersionResponse.model_validate(item) for item in versions]
+
+
+def _qa_response(translation: Translation) -> TranslationQAResponse:
+    return TranslationQAResponse(
+        translation_id=translation.id,
+        qa_status=translation.qa_status,
+        results=[
+            TranslationQAResultResponse.model_validate(result)
+            for result in translation.qa_results
+        ],
+    )
+
+
+@router.get(
+    "/{paper_id}/translations/{translation_id}/qa",
+    response_model=TranslationQAResponse,
+)
+def translation_qa(
+    paper_id: uuid.UUID,
+    translation_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> TranslationQAResponse:
+    translation = get_owned_active_translation(
+        db, current_user, paper_id, translation_id
+    )
+    if translation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Translation not found",
+        )
+    return _qa_response(translation)
+
+
+@router.post(
+    "/{paper_id}/translations/{translation_id}/qa",
+    response_model=TranslationQAResponse,
+)
+def rerun_translation_qa(
+    paper_id: uuid.UUID,
+    translation_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> TranslationQAResponse:
+    translation = rerun_owned_translation_qa(
+        db, current_user, paper_id, translation_id
+    )
+    if translation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Translation not found",
+        )
+    return _qa_response(translation)
 
 
 @router.get("/{paper_id}/file")

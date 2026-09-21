@@ -17,8 +17,17 @@ class MockTranslationProvider(TranslationProvider):
                 f"Mock provider rejected text containing {self.fail_on!r}"
             )
         language = request.target_language
+        glossary_suffix = ""
+        if request.glossary:
+            pairs = "; ".join(
+                f"{source}={target}"
+                for source, target in request.glossary.items()
+            )
+            glossary_suffix = f" [glossary: {pairs}]"
         return TranslationResult(
-            translated_text=f"[{language} academic mock] {request.current_text}",
+            translated_text=(
+                f"[{language} academic mock] {request.current_text}{glossary_suffix}"
+            ),
             provider=self.name,
             model=self.model,
         )

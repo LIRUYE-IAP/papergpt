@@ -55,3 +55,46 @@ class TranslationRunResponse(BaseModel):
 
 class BlockTranslationRunResponse(TranslationRunResponse):
     translation: TranslationResponse | None
+
+
+class TranslationEditPayload(BaseModel):
+    translated_text: str = Field(min_length=1, max_length=200_000)
+
+    @field_validator("translated_text")
+    @classmethod
+    def validate_translated_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("translated_text must not be blank")
+        return normalized
+
+
+class TranslationVersionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    translation_id: uuid.UUID
+    translated_text: str
+    provider: str
+    model: str
+    version_number: int
+    created_at: datetime
+    reason: str
+
+
+class TranslationQAResultResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    translation_id: uuid.UUID
+    check_type: str
+    status: str
+    message: str
+    details: dict[str, object]
+    created_at: datetime
+
+
+class TranslationQAResponse(BaseModel):
+    translation_id: uuid.UUID
+    qa_status: str
+    results: list[TranslationQAResultResponse]

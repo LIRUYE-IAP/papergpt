@@ -11,23 +11,29 @@ import {
 } from "react";
 
 import PdfViewer, { type ReaderPanelHandle } from "@/components/PdfViewer";
+import GlossaryPanel from "@/components/GlossaryPanel";
 import StructuredReader from "@/components/StructuredReader";
+import TranslationPanel from "@/components/TranslationPanel";
 import {
   API_BASE_URL,
   ApiError,
   apiRequest,
   clearToken,
+  type BlockTranslationRun,
   type DocumentBlock,
   getToken,
   type OutlineSection,
   type Paper,
   type ParseResult,
+  type Translation,
+  type TranslationQA,
+  type TranslationRun,
 } from "@/lib/api";
 import { sortByReadingOrder } from "@/lib/reader";
 
 import styles from "./Reader.module.css";
 
-type ReaderMode = "split" | "original" | "structured";
+type ReaderMode = "split" | "original" | "structured" | "chinese" | "bilingual";
 type SyncSource = "pdf" | "document" | "restore";
 
 type OutlineProps = {
@@ -64,10 +70,15 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
   const [paper, setPaper] = useState<Paper | null>(null);
   const [blocks, setBlocks] = useState<DocumentBlock[]>([]);
   const [outline, setOutline] = useState<OutlineSection[]>([]);
+  const [translations, setTranslations] = useState<Translation[]>([]);
+  const [qaByTranslation, setQaByTranslation] = useState<Map<string, TranslationQA>>(new Map());
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [mode, setMode] = useState<ReaderMode>("split");
   const [outlineOpen, setOutlineOpen] = useState(true);
+  const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
+  const [isTranslatingPaper, setIsTranslatingPaper] = useState(false);
+  const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -77,12 +88,18 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
   }, [router]);
 
   const loadReaderData = useCallback(async (accessToken: string) => {
-    const [loadedBlocks, loadedOutline] = await Promise.all([
+    const [loadedBlocks, loadedOutline, loadedTranslations] = await Promise.all([
       apiRequest<DocumentBlock[]>(`/papers/${paperId}/blocks`, {}, accessToken),
       apiRequest<OutlineSection[]>(`/papers/${paperId}/outline`, {}, accessToken),
+      apiRequest<Translation[]>(
+        `/papers/${paperId}/translations?target_language=zh-CN`,
+        {},
+        accessToken,
+      ),
     ]);
     setBlocks(sortByReadingOrder(loadedBlocks));
     setOutline(loadedOutline);
+    setTranslations(loadedTranslations);
   }, [paperId]);
 
   const loadPaper = useCallback(
@@ -98,6 +115,7 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
       } else {
         setBlocks([]);
         setOutline([]);
+        setTranslations([]);
       }
       return loadedPaper;
     },
@@ -163,6 +181,11 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
     [blocks],
   );
 
+  const translationsByBlock = useMemo(
+    () => new Map(translations.map((translation) => [translation.block_id, translation])),
+    [translations],
+  );
+
   function lockSync(source: SyncSource) {
     syncSourceRef.current = source;
     if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
@@ -196,6 +219,120 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
     setActiveBlockId(firstBlock.id);
     documentRef.current?.scrollToBlock(firstBlock.id);
     pdfRef.current?.scrollToBlock(firstBlock.id);
+  }
+
+  function showRequestError(requestError: unknown, fallback: string) {
+    if (requestError instanceof ApiError && requestError.status === 401) {
+      handleAuthFailure();
+      return;
+    }
+    setError(requestError instanceof Error ? requestError.message : fallback);
+  }
+
+  function selectMode(nextMode: ReaderMode) {
+    setMode(nextMode);
+    if (!activeBlockId) return;
+    lockSync("restore");
+    window.setTimeout(() => {
+      documentRef.current?.scrollToBlock(activeBlockId, "auto");
+      pdfRef.current?.scrollToBlock(activeBlockId, "auto");
+    }, 0);
+  }
+
+  async function refreshTranslations() {
+    if (!token) return;
+    const loaded = await apiRequest<Translation[]>(
+      `/papers/${paperId}/translations?target_language=zh-CN`,
+      {},
+      token,
+    );
+    setTranslations(loaded);
+  }
+
+  async function translatePaper() {
+    if (!token) return;
+    setIsTranslatingPaper(true);
+    setError("");
+    try {
+      const result = await apiRequest<TranslationRun>(
+        `/papers/${paperId}/translate`,
+        { method: "POST", body: JSON.stringify({ target_language: "zh-CN" }) },
+        token,
+      );
+      await refreshTranslations();
+      setPaper((current) => current ? { ...current, translation_status: result.failed_count ? "FAILED" : "COMPLETED" } : current);
+      if (mode === "original" || mode === "structured" || mode === "split") selectMode("chinese");
+    } catch (requestError: unknown) {
+      showRequestError(requestError, "Paper translation failed");
+    } finally {
+      setIsTranslatingPaper(false);
+    }
+  }
+
+  async function translateBlock(blockId: string) {
+    if (!token) return;
+    setBusyBlockId(blockId);
+    setError("");
+    try {
+      const result = await apiRequest<BlockTranslationRun>(
+        `/papers/${paperId}/blocks/${blockId}/translate`,
+        { method: "POST", body: JSON.stringify({ target_language: "zh-CN" }) },
+        token,
+      );
+      if (result.translation) {
+        setTranslations((current) => [
+          ...current.filter((translation) => translation.block_id !== blockId),
+          result.translation!,
+        ]);
+      }
+    } catch (requestError: unknown) {
+      showRequestError(requestError, "Block translation failed");
+    } finally {
+      setBusyBlockId(null);
+    }
+  }
+
+  async function editTranslation(translation: Translation, value: string) {
+    if (!token) return;
+    setBusyBlockId(translation.block_id);
+    setError("");
+    try {
+      const updated = await apiRequest<Translation>(
+        `/papers/${paperId}/translations/${translation.id}`,
+        { method: "PATCH", body: JSON.stringify({ translated_text: value }) },
+        token,
+      );
+      setTranslations((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setQaByTranslation((current) => {
+        const next = new Map(current);
+        next.delete(updated.id);
+        return next;
+      });
+    } catch (requestError: unknown) {
+      showRequestError(requestError, "Unable to save translation");
+      throw requestError;
+    } finally {
+      setBusyBlockId(null);
+    }
+  }
+
+  async function loadTranslationQa(translation: Translation, rerun = false) {
+    if (!token) return;
+    setBusyBlockId(translation.block_id);
+    setError("");
+    try {
+      const qa = await apiRequest<TranslationQA>(
+        `/papers/${paperId}/translations/${translation.id}/qa`,
+        { method: rerun ? "POST" : "GET" },
+        token,
+      );
+      setQaByTranslation((current) => new Map(current).set(translation.id, qa));
+      setTranslations((current) => current.map((item) => item.id === translation.id ? { ...item, qa_status: qa.qa_status } : item));
+    } catch (requestError: unknown) {
+      showRequestError(requestError, "Translation QA failed");
+    } finally {
+      setBusyBlockId(null);
+    }
   }
 
   async function parsePaper() {
@@ -315,27 +452,42 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
             <button
               type="button"
               aria-pressed={mode === "split"}
-              onClick={() => setMode("split")}
+              onClick={() => selectMode("split")}
             >
               Side by side
             </button>
             <button
               type="button"
               aria-pressed={mode === "original"}
-              onClick={() => setMode("original")}
+              onClick={() => selectMode("original")}
             >
               Original
             </button>
             <button
               type="button"
               aria-pressed={mode === "structured"}
-              onClick={() => setMode("structured")}
+              onClick={() => selectMode("structured")}
             >
               Structured
             </button>
-            <button type="button" disabled title="Translation is planned for Phase 4">
-              Bilingual · Coming later
+            <button
+              type="button"
+              aria-pressed={mode === "chinese"}
+              onClick={() => selectMode("chinese")}
+            >
+              Chinese
             </button>
+            <button
+              type="button"
+              aria-pressed={mode === "bilingual"}
+              onClick={() => selectMode("bilingual")}
+            >
+              Bilingual
+            </button>
+            <button type="button" onClick={() => void translatePaper()} disabled={isTranslatingPaper}>
+              {isTranslatingPaper ? "Translating…" : "Translate paper"}
+            </button>
+            <button type="button" onClick={() => setGlossaryOpen(true)}>Glossary</button>
             <span className={styles.syncStatus}>
               {activeBlockId ? `Anchor ${activeBlockId.slice(0, 8)}…` : "No active anchor"}
             </span>
@@ -373,14 +525,39 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
               onBlockClick={(blockId) => syncFromPdf(blockId, true)}
               onVisibleBlockChange={(blockId) => syncFromPdf(blockId)}
             />
-            <StructuredReader
-              ref={documentRef}
-              blocks={blocks}
-              activeBlockId={activeBlockId}
-              onBlockClick={(blockId) => syncFromDocument(blockId, true)}
-              onVisibleBlockChange={(blockId) => syncFromDocument(blockId)}
-            />
+            {(mode === "split" || mode === "structured") && (
+              <StructuredReader
+                ref={documentRef}
+                blocks={blocks}
+                activeBlockId={activeBlockId}
+                onBlockClick={(blockId) => syncFromDocument(blockId, true)}
+                onVisibleBlockChange={(blockId) => syncFromDocument(blockId)}
+              />
+            )}
+            {(mode === "chinese" || mode === "bilingual") && (
+              <TranslationPanel
+                ref={documentRef}
+                mode={mode}
+                blocks={blocks}
+                translations={translationsByBlock}
+                qaByTranslation={qaByTranslation}
+                activeBlockId={activeBlockId}
+                busyBlockId={busyBlockId}
+                onBlockClick={(blockId) => syncFromDocument(blockId, true)}
+                onVisibleBlockChange={(blockId) => syncFromDocument(blockId)}
+                onTranslateBlock={translateBlock}
+                onEdit={editTranslation}
+                onLoadQa={loadTranslationQa}
+              />
+            )}
           </div>
+          <GlossaryPanel
+            paperId={paperId}
+            token={token}
+            open={glossaryOpen}
+            onClose={() => setGlossaryOpen(false)}
+            onAuthFailure={handleAuthFailure}
+          />
         </>
       )}
     </main>

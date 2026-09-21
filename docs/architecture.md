@@ -1,25 +1,25 @@
 # PaperGPT Architecture
 
-## Current system — Phase 4A
+## Current system — Phase 4B
 
 PaperGPT is a modular monolith with an independently runnable Next.js frontend and FastAPI backend.
 
 | Layer | Technology | Current responsibility |
 | --- | --- | --- |
-| Frontend | Next.js App Router + PDF.js | Registration, login, library, upload, and synchronized PDF/structured Reader |
-| Backend | FastAPI | Versioned Auth, Paper, PDF delivery, document-engine, translation, and health APIs |
-| Translation core | Provider-neutral services + deterministic mock/OpenAI adapters | Block context, scientific-token protection, academic prompting, persistence, and versioning |
+| Frontend | Next.js App Router + PDF.js | Registration, login, library, upload, and synchronized Original/Structured/Chinese/Bilingual Reader |
+| Backend | FastAPI | Auth, Paper, PDF delivery, document-engine, glossary, translation editing/versioning/QA, and health APIs |
+| Translation core | Provider-neutral services + deterministic mock/OpenAI adapters | Block context, matched glossary constraints, token protection, prompting, persistence, versioning, and deterministic QA |
 | Document engine | PyMuPDF + deterministic heuristics | Born-digital page/block extraction, bbox, columns, reading order, classification, sections, and debug JSON |
-| Persistence | SQLAlchemy 2 + Alembic | User, Paper, Section, Block, Translation, and TranslationVersion models |
-| Database | PostgreSQL + pgvector | Accounts, document structure, Block translations, and history; vector extension reserved for later phases |
-| Cache foundation | Redis | Connectivity only; no Celery tasks or Phase 4A job execution |
+| Persistence | SQLAlchemy 2 + Alembic | User, Paper, Section, Block, Translation, TranslationVersion, GlossaryTerm, and TranslationQAResult models |
+| Database | PostgreSQL + pgvector | Accounts, document structure, glossary constraints, translations, QA findings, and history; vectors remain future |
+| Cache foundation | Redis | Connectivity only; no Celery tasks or Phase 4B job execution |
 | File storage | Local filesystem abstraction | Original PDFs and generated processing JSON under system-generated keys |
 
 ## Authentication and isolation
 
 - Passwords use pwdlib's recommended Argon2 implementation and are never returned by the API.
 - FastAPI issues HS256 JWT bearer tokens containing `sub` and `exp`; the signing secret comes only from the root `.env`.
-- Paper, PDF file, parse, outline, Block, and translation queries always constrain by the authenticated user ID.
+- Paper, PDF file, parse, outline, Block, translation, version, QA, and glossary queries always constrain by the authenticated user ID.
 - Missing and unowned papers have the same not-found response.
 - CORS accepts only the configured `FRONTEND_ORIGIN`, never `*`.
 
@@ -30,10 +30,10 @@ The `/paper/[id]` client loads three owned resources with the same bearer token:
 The persisted deterministic Block UUID is the only synchronization identity:
 
 ```text
-PDF bbox overlay <-> stable Block UUID <-> structured DOM block
+PDF bbox overlay <-> stable Block UUID <-> Translation.block_id <-> Reader DOM block
 ```
 
-Structured nodes use `block-{uuid}` and overlays use `pdf-block-{uuid}`, with `data-block-id={uuid}` on both. No frontend-only content IDs are generated.
+Structured, Chinese, and Bilingual nodes use `block-{uuid}` and overlays use `pdf-block-{uuid}`, with `data-block-id={uuid}` on both. No frontend-only content IDs are generated. Reader mode changes retain the same parent-owned active UUID and URL anchor.
 
 PyMuPDF extraction coordinates use a top-left origin and include the matching page width/height. The Reader converts the absolute bbox to normalized coordinates and scales it to each actual rendered PDF.js viewport. Canvas device-pixel scaling is independent of CSS viewport dimensions, so overlays stay aligned when the panel is resized. The Phase 2 limitation for unusual rotated/cropped combinations remains; these layouts require manual verification.
 
@@ -49,16 +49,39 @@ stable Document Block
 -> mock or OpenAI provider
 -> strict placeholder restoration
 -> Translation + immutable TranslationVersion
+-> deterministic TranslationQAResult set
 -> Block-linked Reader API
 ```
 
-The context builder selects the previous and next eligible Blocks in global reading order. Those Blocks help resolve terminology but the academic prompt explicitly requests output for the current Block only. The serialized prompt input is delimited JSON labelled as untrusted source-document data; commands embedded in any document field cannot redefine the system/developer translation task. Header/footer/page-number/reference Blocks, stale or non-translatable Blocks, figure/table bodies, and equations are conservatively skipped.
+The context builder selects the previous and next eligible Blocks in global reading order and injects only enabled glossary terms matching this bounded context. Those Blocks help resolve terminology but the prompt requests output for the current Block only. Serialized input is delimited JSON labelled as untrusted source-document data. Header/footer/page-number/reference Blocks, stale or non-translatable Blocks, figure/table bodies, and equations are conservatively skipped.
 
 Provider code lives under `app.ai.providers`; translation business logic depends only on the abstract interface. `AI_PROVIDER=mock` is the zero-cost default. `AI_PROVIDER=openai` constructs the official Python SDK only after ownership and parsed-state checks, and requires an environment-provided key and model. The OpenAI adapter uses a stateless Responses API request with `store=False`. Tests never invoke it.
 
 Token preprocessing protects citations, Figure/Table references, number-unit expressions, selected atmospheric chemical species, and statistical notation. Placeholders use a deterministic source-derived namespace and a per-occurrence index, so repeated equal tokens remain independently restorable without colliding with ordinary document text. Restoration requires each placeholder exactly once, so a provider cannot silently drop, duplicate, or alter a protected scientific value.
 
-Each `(block_id, target_language)` has one current Translation. Every successful initial translation or retranslation appends a monotonically numbered TranslationVersion. Failed Blocks retain `FAILED` and `error_message`; successful Blocks are committed independently. `user_modified=true` is an unconditional automatic-translation skip in Phase 4A.
+Each `(block_id, target_language)` has one current Translation. Every successful initial translation, retranslation, or manual edit appends a monotonically numbered TranslationVersion. Manual edits use reason `USER_EDIT`, set `user_modified=true`, and immediately refresh deterministic QA. Failed Blocks retain `FAILED` and `error_message`; successful Blocks are committed independently. `user_modified=true` is an unconditional automatic-translation skip.
+
+## Glossary architecture
+
+`GlossaryTerm` is owned by a User and has either `USER_GLOBAL` scope with no Paper, or `PAPER` scope tied to a Paper owned by that user. Database checks encode this scope/nullability invariant; service ownership checks use uniform `404` responses for missing and unowned resources. Paper terms survive reparse because they are attached to Paper rather than Block.
+
+Resolution precedence is:
+
+```text
+PAPER > USER_GLOBAL > future DOMAIN/AUTO > MODEL
+```
+
+Phase 4B implements the first two levels. Matching respects case sensitivity, token/word boundaries, language pair, enabled state, and longest non-overlapping phrase. Paper conflicts remove the global equivalent before phrase selection. Matching never pre-replaces source content; selected source/target pairs are constraints in the provider request.
+
+## Deterministic translation QA
+
+QA uses no model and produces no pseudo-precise score. Each run replaces the prior `TranslationQAResult` set with named checks for completeness, protected numeric/unit/citation/Figure/Table/chemical/statistical content, glossary terminology, uncertainty markers, placeholder residue, and suspicious output. Each finding carries a status, message, and structured JSON detail. Overall status is `FAILED` when any check fails, otherwise `WARNING` when any warns, otherwise `PASSED`; an unexecuted translation is `PENDING`.
+
+QA, edit, and version endpoints join Translation through the owned Paper and an active (`is_stale=false`) Block. Retained stale history therefore cannot appear in the current Reader or be modified through current-content endpoints.
+
+## Chinese and Bilingual Reader
+
+Chinese and Bilingual panels consume active Blocks and map translations by `Translation.block_id`; array position is never an identity. Missing translations render an explicit state and per-Block action. Bilingual rows put original and Chinese text in one DOM anchor, so both modes reuse Phase 3 scroll observation and PDF bbox synchronization. The parent owns the only `activeBlockId`, and `?block={uuid}` restores it after refresh. QA details, manual-edit state, and glossary controls are auxiliary views over the same owned records.
 
 ## Document-engine pipeline
 
@@ -74,7 +97,7 @@ Each `(block_id, target_language)` has one current Translation. Every successful
 10. Only after in-memory parsing succeeds, one database transaction reconciles stable Section/Block UUIDs. Unchanged rows are updated in place, new rows are inserted, untranslated removed rows are deleted, and translated removed rows are retained as stale history.
 11. Debug artifacts are first written as a complete hidden staging directory. Directory promotion replaces the prior `processing/` set; a failed promotion restores the prior complete set. PostgreSQL remains authoritative.
 
-Parse failure sets the Paper status to `FAILED`. A parser failure before replacement leaves an existing complete parse result intact; database persistence is transactional. Parsing and translation remain synchronous in Phase 4A and do not introduce Celery.
+Parse failure sets the Paper status to `FAILED`. A parser failure before replacement leaves an existing complete parse result intact; database persistence is transactional. Parsing, translation, and QA remain synchronous in Phase 4B and do not introduce Celery.
 
 PostgreSQL transactions and filesystem renames cannot form one cross-resource ACID transaction. The implementation therefore guarantees complete database replacement and complete debug-artifact sets independently. If filesystem promotion fails after database commit, the old complete artifact set is retained and `parse_status` becomes `FAILED`, explicitly signalling that artifacts do not represent the latest database parse.
 
@@ -95,7 +118,7 @@ PostgreSQL transactions and filesystem renames cannot form one cross-resource AC
 
 Foreign keys cascade from Paper. Reparse never deletes an unchanged stable Block. Removed Blocks with no Translation can be deleted; removed or changed Blocks with Translation history remain in the database as `is_stale=true` and are excluded from active Reader queries. Paper deletion is the explicit destructive boundary and removes all related database rows plus the complete storage subtree.
 
-`Translation` belongs to one Paper and one stable Block, is unique by `(block_id, target_language)`, and stores the source snapshot captured at translation time, current translated text, provider/model, status, QA placeholder, timestamps, user-modified protection, and failure message. `TranslationVersion` belongs to a Translation and preserves each successful generated text with provider/model, version number, creation time, and reason. Explicit Paper deletion cascades through both translation tables; parse reconciliation protects translated Blocks from that cascade.
+`Translation` belongs to one Paper and one stable Block, is unique by `(block_id, target_language)`, and stores the source snapshot, current translated text, provider/model, status, aggregate QA status, timestamps, user-modified protection, and failure message. `TranslationVersion` preserves generated and manual-edit snapshots. `TranslationQAResult` stores one named finding per current check. `GlossaryTerm` belongs to a User and optionally an owned Paper. Explicit Paper deletion cascades through Paper-scoped terms and translation tables; parse reconciliation protects translated Blocks from accidental history deletion.
 
 ## Storage layout
 
@@ -137,8 +160,7 @@ Use only a locally supplied PDF that is authorized for testing; never add an unk
 
 ## Explicit future boundaries
 
-- **Phase 4B Reader:** polished Chinese/Bilingual display, editing UI, advanced glossary workflow, and translation QA remain unimplemented. The Bilingual Reader control stays disabled.
-- **Reparse reconciliation UI:** removed/changed translated Blocks are safely retained as stale history, but Phase 4A has no UI or automatic semantic mapping for reconciling that history with a new Block UUID.
+- **Reparse reconciliation UI:** removed/changed translated Blocks are safely retained as stale history, but Phase 4B has no UI or automatic semantic mapping for reconciling that history with a new Block UUID.
 - **AI beyond translation:** no embedding, retrieval, RAG, or AI chat integration is implemented.
 - **Async processing:** Redis is available, but Celery, job queues, progress events, and SSE are not implemented.
 - **OCR:** scanned PDFs are detected only; no OCR pipeline is installed.

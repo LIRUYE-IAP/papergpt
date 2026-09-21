@@ -18,7 +18,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -109,6 +109,12 @@ class Translation(Base):
         passive_deletes=True,
         order_by="TranslationVersion.version_number",
     )
+    qa_results: Mapped[list[TranslationQAResult]] = relationship(
+        back_populates="translation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="TranslationQAResult.check_type",
+    )
 
 
 class TranslationVersion(Base):
@@ -140,3 +146,38 @@ class TranslationVersion(Base):
     reason: Mapped[str] = mapped_column(String(64))
 
     translation: Mapped[Translation] = relationship(back_populates="versions")
+
+
+class TranslationQAResult(Base):
+    __tablename__ = "translation_qa_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "translation_id",
+            "check_type",
+            name="uq_translation_qa_translation_check",
+        ),
+        Index("ix_translation_qa_translation", "translation_id"),
+        Index("ix_translation_qa_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    translation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("translations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    check_type: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    message: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    translation: Mapped[Translation] = relationship(back_populates="qa_results")

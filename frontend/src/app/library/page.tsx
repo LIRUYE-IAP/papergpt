@@ -51,6 +51,7 @@ export default function LibraryPage() {
 
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const token = getToken();
     if (!token || !selectedFile) return;
 
@@ -62,7 +63,7 @@ export default function LibraryPage() {
       await apiRequest<Paper>("/papers", { method: "POST", body: form }, token);
       await loadLibrary(token);
       setSelectedFile(null);
-      const input = event.currentTarget.elements.namedItem("pdf") as HTMLInputElement;
+      const input = formElement.elements.namedItem("pdf") as HTMLInputElement;
       input.value = "";
       setMessage("上传成功");
     } catch (error) {

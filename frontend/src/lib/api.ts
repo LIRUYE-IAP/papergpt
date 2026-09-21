@@ -56,6 +56,80 @@ export type DocumentBlock = {
   parent_block_id: string | null;
   metadata: Record<string, unknown>;
   is_translatable: boolean;
+  is_stale: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Translation = {
+  id: string;
+  paper_id: string;
+  block_id: string;
+  source_language: string;
+  target_language: string;
+  original_text: string;
+  translated_text: string | null;
+  provider: string;
+  model: string;
+  status: string;
+  user_modified: boolean;
+  qa_status: "PENDING" | "PASSED" | "WARNING" | "FAILED";
+  created_at: string;
+  updated_at: string;
+  translated_at: string | null;
+  error_message: string | null;
+};
+
+export type TranslationRun = {
+  translated_count: number;
+  skipped_count: number;
+  failed_count: number;
+};
+
+export type BlockTranslationRun = TranslationRun & {
+  translation: Translation | null;
+};
+
+export type TranslationVersion = {
+  id: string;
+  translation_id: string;
+  translated_text: string;
+  provider: string;
+  model: string;
+  version_number: number;
+  reason: string;
+  created_at: string;
+};
+
+export type TranslationQAResult = {
+  id: string;
+  translation_id: string;
+  check_type: string;
+  status: "PASSED" | "WARNING" | "FAILED";
+  message: string;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
+export type TranslationQA = {
+  translation_id: string;
+  qa_status: Translation["qa_status"];
+  results: TranslationQAResult[];
+};
+
+export type GlossaryScope = "USER_GLOBAL" | "PAPER";
+
+export type GlossaryTerm = {
+  id: string;
+  user_id: string;
+  paper_id: string | null;
+  source_term: string;
+  target_term: string;
+  source_language: string;
+  target_language: string;
+  scope: GlossaryScope;
+  case_sensitive: boolean;
+  enabled: boolean;
   created_at: string;
   updated_at: string;
 };
