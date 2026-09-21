@@ -79,6 +79,22 @@
 - Active/stale boundaries that keep historical translations but exclude them from current Reader and mutation APIs.
 - Reparse preservation of unchanged manually edited translations and Block mappings.
 
+## Phase 4C-1 — Implemented
+
+- Provider-neutral exception hierarchy for rate limit, authentication, permission, invalid request, unavailable model, timeout, connection, 5xx, and generic failures.
+- OpenAI SDK exception mapping confined to the provider adapter.
+- Stable structured Translation API error envelope and safe HTTP status mapping.
+- Numeric/date `Retry-After` support without parsing free-form provider messages.
+- Explicit 60-second OpenAI timeout and disabled SDK automatic retries.
+- Safe `FAILED` persistence with no dangling `PROCESSING` Translation rows.
+- Successful manual retry returns a failed Translation to `COMPLETED` and clears its error.
+- Whole-paper provider-wide fail-fast with preserved successes and partial counts.
+- Typed frontend API errors, bounded browser requests, per-Block loading state, readable Chinese messages, and Retry controls.
+- Translate Paper loading recovery and partial-failure notice.
+- Monkeypatched provider tests and deterministic mock browser failure modes; pytest never calls OpenAI.
+
+Phase 4C-1 does not change translation prompts or implement async jobs. Real translation quality and prompt optimization belong to a later Phase 4C quality stage.
+
 The following also remain future work:
 
 - Additional provider adapters beyond the Phase 4A OpenAI boundary

@@ -1,6 +1,6 @@
 # PaperGPT
 
-PaperGPT Phase 4B turns the synchronous academic-translation core into an editable reading workflow. The PDF.js Reader now supports Chinese and Bilingual modes, stable Block-linked translation editing, deterministic QA issue details, and Paper/User glossary management. RAG, chat, background jobs, and other Phase 5 work are not implemented.
+PaperGPT Phase 4C-1 hardens the Phase 4B reading workflow for real OpenAI failures. Provider errors are normalized into a stable HTTP contract, failed translations cannot remain stuck in `PROCESSING`, and the Reader always releases block/paper loading state with a readable error and manual Retry action. Translation quality/prompt work, RAG, chat, and background jobs are not implemented.
 
 ## Prerequisites
 
@@ -24,10 +24,10 @@ Important local settings include:
 - `MAX_PDF_UPLOAD_MB`: PDF upload limit
 - `FRONTEND_ORIGIN`: the allowed browser origin for CORS
 - `STORAGE_ROOT`: local original-PDF and processing-artifact root
-- `AI_PROVIDER`: `mock` by default; Phase 4B development and acceptance use only this provider
-- `OPENAI_API_KEY`: reserved environment variable for the retained future adapter; it is not required or used by the Phase 4B workflow
+- `AI_PROVIDER`: `mock` by default, or `openai` for the real provider adapter
+- `OPENAI_API_KEY`: required only when `AI_PROVIDER=openai`; keep it exclusively in the ignored root `.env`
 
-Local development, automated tests, HTTP E2E, and browser acceptance use the deterministic mock provider and need no API key. The OpenAI adapter remains behind the provider interface, but Phase 4B does not call it.
+Automated tests force the deterministic mock provider and remove the key from the test settings object, regardless of local `.env`, so pytest performs zero OpenAI network requests. The real OpenAI adapter has an explicit 60-second request timeout and disables SDK automatic retries; users retry manually after a surfaced error.
 
 ## Backend environment
 
@@ -115,6 +115,27 @@ Automatic translation skips `HEADER`, `FOOTER`, `PAGE_NUMBER`, `REFERENCE`, figu
 Before translation, citations, Figure/Table references, scientific number/unit expressions, selected chemical species, and common statistical symbols are replaced with deterministic placeholders. A translation is accepted only if every placeholder is returned exactly once; otherwise that Block is marked `FAILED`. The original tokens are restored before persistence.
 
 `translations` has one row per `(block_id, target_language)`. Every successful generation appends a `translation_versions` snapshot with an increasing version number. `original_text` is the source snapshot captured when translation begins. A row marked `user_modified=true` is skipped by whole-paper and single-Block automatic translation and is never overwritten without a future explicit force workflow.
+
+### Real-provider failure contract
+
+The OpenAI adapter converts SDK exceptions before they leave the provider boundary. API responses use a stable envelope:
+
+```json
+{
+  "error": {
+    "code": "AI_RATE_LIMITED",
+    "message": "Translation service rate limit reached.",
+    "retry_after_seconds": 120,
+    "partial_result": null
+  }
+}
+```
+
+Supported codes are `AI_RATE_LIMITED`, `AI_AUTHENTICATION_FAILED`, `AI_PERMISSION_DENIED`, `AI_INVALID_REQUEST`, `AI_MODEL_UNAVAILABLE`, `AI_TIMEOUT`, `AI_CONNECTION_FAILED`, `AI_SERVICE_UNAVAILABLE`, and `TRANSLATION_FAILED`. Provider authentication failures are server-side `502` responses, not PaperGPT-user `401` responses, so they never log out the current user.
+
+A failed provider call is transactionally persisted as `Translation.status=FAILED` with a short safe message; SDK response bodies, request headers, credentials, organization identifiers, and source PDF text are not stored or logged. A successful manual Retry changes the row to `COMPLETED` and clears `error_message`.
+
+Whole-paper translation stops immediately on provider-wide rate-limit, authentication, permission, model, timeout, connection, or availability failures. Its error envelope includes completed/skipped/failed/remaining partial counts. Already completed Blocks remain committed, the current failed Block is `FAILED`, and unattempted Blocks are not falsely marked failed. There is no automatic retry loop.
 
 ### Glossary, editing, and deterministic QA
 
@@ -231,6 +252,8 @@ Implemented pages remain:
 - `/paper/[id]`
 
 `/paper/[id]` is the Phase 4B Reader. It renders the authenticated original PDF through PDF.js and provides Original, Structured, Chinese, and Bilingual reading modes. It also exposes Translate Paper, Translate Block, plain-text manual editing, deterministic QA details, and a minimal Paper/global Glossary manager.
+
+Phase 4C-1 adds per-Block translating state, readable Chinese provider errors, failed-state Retry controls, bounded frontend requests, and whole-paper partial-failure notices. Every success, HTTP error, network failure, malformed error body, or timeout exits loading state through `finally`; one Block's request no longer locks unrelated Block controls.
 
 ### Reader anchors and synchronization
 

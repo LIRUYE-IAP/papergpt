@@ -28,6 +28,7 @@ import {
   type Translation,
   type TranslationQA,
   type TranslationRun,
+  translationErrorMessage,
 } from "@/lib/api";
 import { sortByReadingOrder } from "@/lib/reader";
 
@@ -78,7 +79,10 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
   const [isTranslatingPaper, setIsTranslatingPaper] = useState(false);
+  const [translatingBlockIds, setTranslatingBlockIds] = useState<Set<string>>(new Set());
   const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
+  const [blockTranslationErrors, setBlockTranslationErrors] = useState<Map<string, string>>(new Map());
+  const [translationNotice, setTranslationNotice] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -253,6 +257,7 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
     if (!token) return;
     setIsTranslatingPaper(true);
     setError("");
+    setTranslationNotice("");
     try {
       const result = await apiRequest<TranslationRun>(
         `/papers/${paperId}/translate`,
@@ -261,9 +266,33 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
       );
       await refreshTranslations();
       setPaper((current) => current ? { ...current, translation_status: result.failed_count ? "FAILED" : "COMPLETED" } : current);
+      setTranslationNotice(
+        result.failed_count
+          ? `翻译完成，但有 ${result.failed_count} 个段落失败，可在对应段落重试。`
+          : `翻译完成：${result.translated_count} 个段落已更新。`,
+      );
       if (mode === "original" || mode === "structured" || mode === "split") selectMode("chinese");
     } catch (requestError: unknown) {
-      showRequestError(requestError, "Paper translation failed");
+      if (requestError instanceof ApiError && requestError.status === 401) {
+        handleAuthFailure();
+        return;
+      }
+      const message = translationErrorMessage(requestError);
+      const partial = requestError instanceof ApiError ? requestError.partialResult : null;
+      setTranslationNotice(
+        `${requestError instanceof ApiError && requestError.code === "AI_RATE_LIMITED" ? "翻译已暂停：" : ""}${message}` +
+        (partial && partial.translated_count > 0
+          ? ` 已保留 ${partial.translated_count} 个已完成段落。`
+          : ""),
+      );
+      setPaper((current) => current ? { ...current, translation_status: "FAILED" } : current);
+      try {
+        await refreshTranslations();
+      } catch (refreshError: unknown) {
+        if (refreshError instanceof ApiError && refreshError.status === 401) {
+          handleAuthFailure();
+        }
+      }
     } finally {
       setIsTranslatingPaper(false);
     }
@@ -271,7 +300,12 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
 
   async function translateBlock(blockId: string) {
     if (!token) return;
-    setBusyBlockId(blockId);
+    setTranslatingBlockIds((current) => new Set(current).add(blockId));
+    setBlockTranslationErrors((current) => {
+      const next = new Map(current);
+      next.delete(blockId);
+      return next;
+    });
     setError("");
     try {
       const result = await apiRequest<BlockTranslationRun>(
@@ -286,9 +320,26 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
         ]);
       }
     } catch (requestError: unknown) {
-      showRequestError(requestError, "Block translation failed");
+      if (requestError instanceof ApiError && requestError.status === 401) {
+        handleAuthFailure();
+        return;
+      }
+      setBlockTranslationErrors((current) =>
+        new Map(current).set(blockId, translationErrorMessage(requestError)),
+      );
+      try {
+        await refreshTranslations();
+      } catch (refreshError: unknown) {
+        if (refreshError instanceof ApiError && refreshError.status === 401) {
+          handleAuthFailure();
+        }
+      }
     } finally {
-      setBusyBlockId(null);
+      setTranslatingBlockIds((current) => {
+        const next = new Set(current);
+        next.delete(blockId);
+        return next;
+      });
     }
   }
 
@@ -494,6 +545,11 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
           </nav>
 
           {error && <p className={styles.readerError}>{error}</p>}
+          {translationNotice && (
+            <p className={styles.translationNotice} role="status">
+              {translationNotice}
+            </p>
+          )}
 
           <div
             className={`${styles.readerWorkspace} ${styles[`mode_${mode}`]} ${
@@ -542,6 +598,8 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
                 translations={translationsByBlock}
                 qaByTranslation={qaByTranslation}
                 activeBlockId={activeBlockId}
+                translatingBlockIds={translatingBlockIds}
+                blockErrors={blockTranslationErrors}
                 busyBlockId={busyBlockId}
                 onBlockClick={(blockId) => syncFromDocument(blockId, true)}
                 onVisibleBlockChange={(blockId) => syncFromDocument(blockId)}

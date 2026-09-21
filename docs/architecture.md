@@ -1,6 +1,6 @@
 # PaperGPT Architecture
 
-## Current system — Phase 4B
+## Current system — Phase 4C-1
 
 PaperGPT is a modular monolith with an independently runnable Next.js frontend and FastAPI backend.
 
@@ -8,7 +8,7 @@ PaperGPT is a modular monolith with an independently runnable Next.js frontend a
 | --- | --- | --- |
 | Frontend | Next.js App Router + PDF.js | Registration, login, library, upload, and synchronized Original/Structured/Chinese/Bilingual Reader |
 | Backend | FastAPI | Auth, Paper, PDF delivery, document-engine, glossary, translation editing/versioning/QA, and health APIs |
-| Translation core | Provider-neutral services + deterministic mock/OpenAI adapters | Block context, matched glossary constraints, token protection, prompting, persistence, versioning, and deterministic QA |
+| Translation core | Provider-neutral services + deterministic mock/OpenAI adapters | Block context, matched glossary constraints, token protection, prompting, persistence, versioning, deterministic QA, and normalized provider failures |
 | Document engine | PyMuPDF + deterministic heuristics | Born-digital page/block extraction, bbox, columns, reading order, classification, sections, and debug JSON |
 | Persistence | SQLAlchemy 2 + Alembic | User, Paper, Section, Block, Translation, TranslationVersion, GlossaryTerm, and TranslationQAResult models |
 | Database | PostgreSQL + pgvector | Accounts, document structure, glossary constraints, translations, QA findings, and history; vectors remain future |
@@ -57,6 +57,26 @@ The context builder selects the previous and next eligible Blocks in global read
 
 Provider code lives under `app.ai.providers`; translation business logic depends only on the abstract interface. `AI_PROVIDER=mock` is the zero-cost default. `AI_PROVIDER=openai` constructs the official Python SDK only after ownership and parsed-state checks, and requires an environment-provided key and model. The OpenAI adapter uses a stateless Responses API request with `store=False`. Tests never invoke it.
 
+## Provider error and recovery boundary
+
+SDK-specific OpenAI exceptions never leave `OpenAITranslationProvider`. The adapter maps rate limit, authentication, permission, bad request, model-not-found, timeout, connection, and 5xx failures to provider-neutral errors containing only a stable code, safe message, HTTP status, and optional numeric/date-derived `Retry-After`. It never parses retry timing from free-form provider messages. The client uses a 60-second timeout with `max_retries=0`, so RPD exhaustion cannot trigger an immediate retry loop.
+
+```text
+OpenAI SDK exception
+-> provider-neutral AI error
+-> safe FAILED Translation persistence
+-> stable HTTP { error: ... } envelope
+-> typed frontend ApiError
+-> Chinese error / Retry UI
+-> loading reset in finally
+```
+
+Single-Block failures return the mapped HTTP status after the Translation has been committed as `FAILED`. A later successful Retry reuses the stable Block/Translation identity, changes status to `COMPLETED`, and clears the safe error message. Provider authentication uses `502`, never the application's authentication `401`.
+
+Whole-paper processing commits each Block independently. Provider-wide failures stop the loop after the first failure and return partial translated/skipped/failed/remaining counts; prior successes remain, the failed Block is persisted, and remaining Blocks stay unattempted. Content-specific generic failures may continue under the existing per-Block isolation policy.
+
+Safe warning logs contain category, provider/model, Paper UUID, Block UUID, and provider HTTP status only. They omit credentials, authorization headers, provider response bodies, organization identifiers, complete prompts, and document text.
+
 Token preprocessing protects citations, Figure/Table references, number-unit expressions, selected atmospheric chemical species, and statistical notation. Placeholders use a deterministic source-derived namespace and a per-occurrence index, so repeated equal tokens remain independently restorable without colliding with ordinary document text. Restoration requires each placeholder exactly once, so a provider cannot silently drop, duplicate, or alter a protected scientific value.
 
 Each `(block_id, target_language)` has one current Translation. Every successful initial translation, retranslation, or manual edit appends a monotonically numbered TranslationVersion. Manual edits use reason `USER_EDIT`, set `user_modified=true`, and immediately refresh deterministic QA. Failed Blocks retain `FAILED` and `error_message`; successful Blocks are committed independently. `user_modified=true` is an unconditional automatic-translation skip.
@@ -97,7 +117,7 @@ Chinese and Bilingual panels consume active Blocks and map translations by `Tran
 10. Only after in-memory parsing succeeds, one database transaction reconciles stable Section/Block UUIDs. Unchanged rows are updated in place, new rows are inserted, untranslated removed rows are deleted, and translated removed rows are retained as stale history.
 11. Debug artifacts are first written as a complete hidden staging directory. Directory promotion replaces the prior `processing/` set; a failed promotion restores the prior complete set. PostgreSQL remains authoritative.
 
-Parse failure sets the Paper status to `FAILED`. A parser failure before replacement leaves an existing complete parse result intact; database persistence is transactional. Parsing, translation, and QA remain synchronous in Phase 4B and do not introduce Celery.
+Parse failure sets the Paper status to `FAILED`. A parser failure before replacement leaves an existing complete parse result intact; database persistence is transactional. Parsing, translation, and QA remain synchronous in Phase 4C-1 and do not introduce Celery, background jobs, or SSE.
 
 PostgreSQL transactions and filesystem renames cannot form one cross-resource ACID transaction. The implementation therefore guarantees complete database replacement and complete debug-artifact sets independently. If filesystem promotion fails after database commit, the old complete artifact set is retained and `parse_status` becomes `FAILED`, explicitly signalling that artifacts do not represent the latest database parse.
 
@@ -162,6 +182,6 @@ Use only a locally supplied PDF that is authorized for testing; never add an unk
 
 - **Reparse reconciliation UI:** removed/changed translated Blocks are safely retained as stale history, but Phase 4B has no UI or automatic semantic mapping for reconciling that history with a new Block UUID.
 - **AI beyond translation:** no embedding, retrieval, RAG, or AI chat integration is implemented.
-- **Async processing:** Redis is available, but Celery, job queues, progress events, and SSE are not implemented.
+- **Async processing:** Redis is available, but Celery, job queues, progress events, and SSE are not implemented. Phase 4C-1 uses bounded synchronous requests and manual Retry.
 - **OCR:** scanned PDFs are detected only; no OCR pipeline is installed.
 - **Export and commercial features:** Word export, memberships, plans, and payments remain future work.

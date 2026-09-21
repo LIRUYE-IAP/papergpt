@@ -228,6 +228,15 @@
   color: #a64035;
 }
 
+.translationNotice {
+  margin: 0;
+  border-bottom: 1px solid #d8dfda;
+  background: #eef5f1;
+  color: #315846;
+  padding: 0.6rem 1rem;
+  font-size: 0.82rem;
+}
+
 .pageError {
   position: absolute;
   inset: 1rem;
@@ -317,6 +326,36 @@
 
 .translatedText {
   font-size: 0.98rem;
+}
+
+.previousTranslation {
+  display: block;
+  margin-bottom: 0.55rem;
+  color: #6d7772;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+.translationFailure {
+  display: grid;
+  gap: 0.4rem;
+  border: 1px solid #e5b9b4;
+  border-radius: 0.5rem;
+  background: #fff4f2;
+  color: #843c34;
+  padding: 0.7rem;
+  font-size: 0.78rem;
+}
+
+.translationFailure button {
+  width: fit-content;
+  border: 1px solid #d8a39d;
+  border-radius: 0.4rem;
+  background: white;
+  color: #843c34;
+  padding: 0.34rem 0.58rem;
+  font-weight: 750;
 }
 
 .peripheralTranslation {

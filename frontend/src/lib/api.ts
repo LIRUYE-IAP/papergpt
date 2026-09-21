@@ -84,6 +84,7 @@ export type TranslationRun = {
   translated_count: number;
   skipped_count: number;
   failed_count: number;
+  remaining_count: number;
 };
 
 export type BlockTranslationRun = TranslationRun & {
@@ -162,8 +163,81 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    public code: string = "REQUEST_FAILED",
+    public retryAfterSeconds: number | null = null,
+    public partialResult: TranslationRun | null = null,
   ) {
     super(message);
+    this.name = "ApiError";
+  }
+}
+
+type ErrorEnvelope = {
+  error?: {
+    code?: unknown;
+    message?: unknown;
+    retry_after_seconds?: unknown;
+    partial_result?: unknown;
+  };
+  detail?: unknown;
+};
+
+const REQUEST_TIMEOUT_MS = 95_000;
+
+function isTranslationRun(value: unknown): value is TranslationRun {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return ["translated_count", "skipped_count", "failed_count", "remaining_count"]
+    .every((key) => typeof candidate[key] === "number");
+}
+
+export function translationErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) return "翻译失败，请稍后重试。";
+  switch (error.code) {
+    case "AI_RATE_LIMITED": {
+      if (error.retryAfterSeconds !== null) {
+        const minutes = Math.max(1, Math.ceil(error.retryAfterSeconds / 60));
+        return `已达到 AI 翻译服务请求限制，预计约 ${minutes} 分钟后可重试。`;
+      }
+      return "已达到 AI 翻译服务请求限制，请稍后重试。";
+    }
+    case "AI_TIMEOUT":
+    case "REQUEST_TIMEOUT":
+      return "AI 翻译服务响应超时，请稍后重试。";
+    case "AI_CONNECTION_FAILED":
+    case "NETWORK_ERROR":
+      return "暂时无法连接 AI 翻译服务，请检查网络后重试。";
+    case "AI_AUTHENTICATION_FAILED":
+      return "AI 翻译服务配置无效，请检查服务器 API Key。";
+    case "AI_PERMISSION_DENIED":
+      return "AI 翻译服务没有所需权限，请检查服务器配置。";
+    case "AI_INVALID_REQUEST":
+      return "AI 翻译请求无效，请检查服务器配置。";
+    case "AI_MODEL_UNAVAILABLE":
+      return "当前翻译模型暂不可用，请检查模型配置。";
+    case "AI_SERVICE_UNAVAILABLE":
+      return "AI 翻译服务暂不可用，请稍后重试。";
+    default:
+      return "翻译失败，请稍后重试。";
+  }
+}
+
+export function storedTranslationErrorMessage(message: string | null): string {
+  switch (message) {
+    case "Translation service rate limit reached.":
+      return "已达到 AI 翻译服务请求限制，请稍后重试。";
+    case "Translation provider request timed out.":
+      return "AI 翻译服务响应超时，请稍后重试。";
+    case "Translation provider connection failed.":
+      return "暂时无法连接 AI 翻译服务，请检查网络后重试。";
+    case "Translation provider authentication failed.":
+      return "AI 翻译服务配置无效，请检查服务器 API Key。";
+    case "Translation model is unavailable.":
+      return "当前翻译模型暂不可用，请检查模型配置。";
+    case "Translation provider is temporarily unavailable.":
+      return "AI 翻译服务暂不可用，请稍后重试。";
+    default:
+      return "翻译失败，请稍后重试。";
   }
 }
 
@@ -190,13 +264,54 @@ export async function apiRequest<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const suppliedSignal = init.signal;
+  const abortFromCaller = () => controller.abort();
+  suppliedSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (error: unknown) {
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        "Request timed out",
+        0,
+        suppliedSignal?.aborted ? "REQUEST_CANCELLED" : "REQUEST_TIMEOUT",
+      );
+    }
+    throw new ApiError(
+      error instanceof Error ? error.message : "Network request failed",
+      0,
+      "NETWORK_ERROR",
+    );
+  } finally {
+    window.clearTimeout(timeout);
+    suppliedSignal?.removeEventListener("abort", abortFromCaller);
+  }
   if (response.status === 204) return undefined as T;
 
-  const body = await response.json().catch(() => null);
+  const body = await response.json().catch(() => null) as ErrorEnvelope | null;
   if (!response.ok) {
-    const detail = typeof body?.detail === "string" ? body.detail : "请求失败，请稍后重试";
-    throw new ApiError(detail, response.status);
+    const contract = body?.error;
+    const message = typeof contract?.message === "string"
+      ? contract.message
+      : typeof body?.detail === "string"
+        ? body.detail
+        : "请求失败，请稍后重试";
+    throw new ApiError(
+      message,
+      response.status,
+      typeof contract?.code === "string" ? contract.code : "REQUEST_FAILED",
+      typeof contract?.retry_after_seconds === "number"
+        ? contract.retry_after_seconds
+        : null,
+      isTranslationRun(contract?.partial_result) ? contract.partial_result : null,
+    );
   }
   return body as T;
 }

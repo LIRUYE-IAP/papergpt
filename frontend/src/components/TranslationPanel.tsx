@@ -13,6 +13,7 @@ import type {
   Translation,
   TranslationQA,
 } from "@/lib/api";
+import { storedTranslationErrorMessage } from "@/lib/api";
 import {
   closestBlockToViewportCenter,
   scrollElementToCenter,
@@ -31,6 +32,8 @@ type TranslationPanelProps = {
   translations: Map<string, Translation>;
   qaByTranslation: Map<string, TranslationQA>;
   activeBlockId: string | null;
+  translatingBlockIds: ReadonlySet<string>;
+  blockErrors: ReadonlyMap<string, string>;
   busyBlockId: string | null;
   onBlockClick: (blockId: string) => void;
   onVisibleBlockChange: (blockId: string) => void;
@@ -49,6 +52,8 @@ const TranslationPanel = forwardRef<ReaderPanelHandle, TranslationPanelProps>(
       translations,
       qaByTranslation,
       activeBlockId,
+      translatingBlockIds,
+      blockErrors,
       busyBlockId,
       onBlockClick,
       onVisibleBlockChange,
@@ -101,6 +106,12 @@ const TranslationPanel = forwardRef<ReaderPanelHandle, TranslationPanelProps>(
             {blocks.map((block) => {
               const translation = translations.get(block.id);
               const isBusy = busyBlockId === block.id;
+              const isTranslating = translatingBlockIds.has(block.id);
+              const failureMessage = blockErrors.get(block.id) ?? (
+                translation?.status === "FAILED"
+                  ? storedTranslationErrorMessage(translation.error_message)
+                  : null
+              );
               return (
                 <div
                   key={block.id}
@@ -128,7 +139,30 @@ const TranslationPanel = forwardRef<ReaderPanelHandle, TranslationPanelProps>(
                   {mode === "bilingual" && (
                     <span className={styles.originalText}>{block.original_text}</span>
                   )}
-                  {translation?.translated_text ? (
+                  {failureMessage ? (
+                    <>
+                      {translation?.translated_text && (
+                        <span className={styles.previousTranslation}>
+                          {translation.translated_text}
+                        </span>
+                      )}
+                      <span
+                        className={styles.translationFailure}
+                        role="alert"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <strong>翻译失败</strong>
+                        <span>{failureMessage}</span>
+                        <button
+                          type="button"
+                          disabled={isTranslating}
+                          onClick={() => void onTranslateBlock(block.id)}
+                        >
+                          {isTranslating ? "Translating…" : "Retry"}
+                        </button>
+                      </span>
+                    </>
+                  ) : translation?.translated_text ? (
                     editingId === translation.id ? (
                       <TranslationEditor
                         translation={translation}
@@ -162,13 +196,13 @@ const TranslationPanel = forwardRef<ReaderPanelHandle, TranslationPanelProps>(
                       <span>尚未翻译</span>
                       <button
                         type="button"
-                        disabled={isBusy}
+                        disabled={isTranslating}
                         onClick={(event) => {
                           event.stopPropagation();
                           void onTranslateBlock(block.id);
                         }}
                       >
-                        {isBusy ? "Translating…" : "Translate block"}
+                        {isTranslating ? "Translating…" : "Translate block"}
                       </button>
                     </span>
                   ) : (
