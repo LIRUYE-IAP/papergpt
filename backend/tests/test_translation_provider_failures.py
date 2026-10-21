@@ -13,7 +13,13 @@ from app.ai.errors import (
     AITimeoutError,
 )
 from app.ai.providers.base import TranslationProvider
-from app.ai.types import TranslationRequest, TranslationResult
+from app.ai.types import (
+    BatchTranslationRequest,
+    BatchTranslationResult,
+    BatchTranslationResultItem,
+    TranslationRequest,
+    TranslationResult,
+)
 from app.db.session import SessionLocal
 from app.models.paper import Paper
 from app.models.translation import Translation, TranslationStatus
@@ -42,6 +48,24 @@ class ControlledProvider(TranslationProvider):
             raise self.failure
         return TranslationResult(
             translated_text=f"[controlled] {request.current_text}",
+            provider=self.name,
+            model=self.model,
+        )
+
+    def translate_batch(
+        self, request: BatchTranslationRequest
+    ) -> BatchTranslationResult:
+        self.calls += 1
+        if self.failure is not None and self.calls > self.fail_after:
+            raise self.failure
+        return BatchTranslationResult(
+            items=tuple(
+                BatchTranslationResultItem(
+                    block_id=item.block_id,
+                    translated_text=f"[controlled] {item.protected_text}",
+                )
+                for item in request.items
+            ),
             provider=self.name,
             model=self.model,
         )
@@ -182,9 +206,11 @@ def test_whole_paper_provider_wide_failure_stops_and_preserves_partial_success(
     assert response.status_code == 429
     error = response.json()["error"]
     assert error["code"] == "AI_RATE_LIMITED"
-    assert error["partial_result"]["translated_count"] == 1
-    assert error["partial_result"]["failed_count"] == 1
+    assert error["partial_result"]["translated_count"] > 0
+    assert error["partial_result"]["failed_count"] > 0
     assert error["partial_result"]["remaining_count"] > 0
+    assert error["partial_result"]["batch_count"] == 2
+    assert error["partial_result"]["provider_request_count"] == 2
     assert provider.calls == 2
     with SessionLocal() as db:
         completed = db.scalar(
@@ -206,8 +232,8 @@ def test_whole_paper_provider_wide_failure_stops_and_preserves_partial_success(
             )
         )
         saved_paper = db.get(Paper, paper["id"])
-    assert completed == 1
-    assert failed == 1
+    assert completed == error["partial_result"]["translated_count"]
+    assert failed == error["partial_result"]["failed_count"]
     assert processing == 0
     assert saved_paper is not None
     assert saved_paper.translation_status == "FAILED"

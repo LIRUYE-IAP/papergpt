@@ -95,6 +95,23 @@
 
 Phase 4C-1 does not change translation prompts or implement async jobs. Real translation quality and prompt optimization belong to a later Phase 4C quality stage.
 
+## Phase 4C-2 — Implemented
+
+- Synchronous multi-Block translation through the existing Responses API; explicitly not the asynchronous OpenAI Batch API.
+- Provider-neutral batch request/result types with stable Block UUID as the only mapping key.
+- Section-aware batching with configurable six-Block and 15,000-character defaults; oversized Blocks are never truncated.
+- Batch-level edge context without duplicating previous/current/next payloads for every item.
+- Relevant Paper-over-global glossary union with per-item matched-term metadata.
+- Block-specific protected-token namespaces and independent restore/validation.
+- Strict structured output with order-independent mapping, fatal unknown/duplicate IDs, and explicit missing-item failure.
+- Per-item partial failure for empty/corrupt translations; independent TranslationVersion and deterministic QA.
+- Per-batch transactions and provider-wide fail-fast with earlier batches preserved and no dangling `PROCESSING` rows.
+- Whole-paper response and Reader notice include batch and provider request counts.
+- Deterministic mock modes for reordered, missing, duplicate, unknown, corrupt, rate-limit, timeout, and unavailable responses.
+- Request-reduction regression: 25 Blocks become 5 provider requests under a five-Block test limit.
+
+Phase 4C-2 remains synchronous. Celery, SSE, background jobs, WebSocket progress, JSONL upload, OpenAI Batch jobs, and academic translation quality optimization are not implemented.
+
 The following also remain future work:
 
 - Additional provider adapters beyond the Phase 4A OpenAI boundary

@@ -1,6 +1,6 @@
 # PaperGPT
 
-PaperGPT Phase 4C-1 hardens the Phase 4B reading workflow for real OpenAI failures. Provider errors are normalized into a stable HTTP contract, failed translations cannot remain stuck in `PROCESSING`, and the Reader always releases block/paper loading state with a readable error and manual Retry action. Translation quality/prompt work, RAG, chat, and background jobs are not implemented.
+PaperGPT Phase 4C-2 translates adjacent document Blocks in bounded synchronous batches. One Responses API request returns structured translations keyed by stable Block UUID, reducing provider requests while preserving Phase 4C-1 error recovery, protected tokens, glossary constraints, versions, deterministic QA, and Reader synchronization. This is not the asynchronous OpenAI Batch API; translation quality tuning, RAG, chat, and background jobs are not implemented.
 
 ## Prerequisites
 
@@ -26,6 +26,8 @@ Important local settings include:
 - `STORAGE_ROOT`: local original-PDF and processing-artifact root
 - `AI_PROVIDER`: `mock` by default, or `openai` for the real provider adapter
 - `OPENAI_API_KEY`: required only when `AI_PROVIDER=openai`; keep it exclusively in the ignored root `.env`
+- `TRANSLATION_BATCH_MAX_BLOCKS`: maximum Blocks per synchronous provider request; default `6`
+- `TRANSLATION_BATCH_MAX_CHARS`: maximum combined source characters per batch; default `15000`
 
 Automated tests force the deterministic mock provider and remove the key from the test settings object, regardless of local `.env`, so pytest performs zero OpenAI network requests. The real OpenAI adapter has an explicit 60-second request timeout and disables SDK automatic retries; users retry manually after a surfaced error.
 
@@ -106,13 +108,17 @@ Ownership is enforced by backend queries. Missing and unowned papers both return
 
 ## Academic translation core
 
-Phase 4B still translates one persisted Document Block at a time. A request contains the paper title, section title, Block type, previous/current/next translatable text, source/target language, and only the enabled glossary terms that actually match that local context. Only `current_text` is translated; adjacent Blocks are context only.
+Phase 4C-2 keeps single-Block translation available but changes whole-paper translation to bounded synchronous multi-Block requests. Eligible active Blocks are kept in reading order, grouped within Section boundaries, and split when either configured Block or source-character limit is reached. An oversized Block is sent alone without truncation. Completed or manually edited translations are skipped.
+
+Each batch contains paper/Section/language context, protected source text for every item, only glossary terms matched in the batch or its two external edge contexts, and the stable Block UUID. Internal batch Blocks serve as each other's context, so previous/current/next payloads are not duplicated for every item. The provider returns strict structured output shaped as `translations[{block_id, translated_text}]`; PaperGPT maps solely by UUID and never by output order or array position.
 
 The default `mock` provider is deterministic and makes no network request. The optional `openai` adapter uses the official Python SDK and Responses API behind the same provider interface. Business services do not import provider SDKs directly.
 
-Automatic translation skips `HEADER`, `FOOTER`, `PAGE_NUMBER`, `REFERENCE`, figure/table body Blocks, equations, and every Block with `is_translatable=false`. Completed and failed records are committed per Block, so one provider failure does not roll back earlier successes. Paper-level responses report `translated_count`, `skipped_count`, and `failed_count`.
+Automatic translation skips `HEADER`, `FOOTER`, `PAGE_NUMBER`, `REFERENCE`, figure/table body Blocks, equations, and every Block with `is_translatable=false`. Batch transactions commit independently, so a later provider failure cannot roll back earlier batches. Paper-level responses report `translated_count`, `skipped_count`, `failed_count`, `remaining_count`, `batch_count`, and `provider_request_count`; the Reader summarizes translated Blocks and AI request count.
 
-Before translation, citations, Figure/Table references, scientific number/unit expressions, selected chemical species, and common statistical symbols are replaced with deterministic placeholders. A translation is accepted only if every placeholder is returned exactly once; otherwise that Block is marked `FAILED`. The original tokens are restored before persistence.
+Before translation, citations, Figure/Table references, scientific number/unit expressions, selected chemical species, and common statistical symbols are replaced with deterministic placeholders. Batch placeholders include a stable Block-specific namespace seed so equal scientific tokens in different Blocks cannot collide. Every output item is validated and restored independently: one corrupt item becomes `FAILED` while valid siblings are versioned, QA-checked, and committed.
+
+Returned IDs are order-independent. Unknown or duplicate UUIDs make the entire provider response untrustworthy and raise `AI_INVALID_BATCH_RESPONSE`, fail the current batch, and stop later batches without falling back to one-request-per-Block. A missing requested UUID fails only that Block. Provider-wide 429/auth/permission/model/timeout/connection/5xx errors similarly fail-fast after committing earlier batches.
 
 `translations` has one row per `(block_id, target_language)`. Every successful generation appends a `translation_versions` snapshot with an increasing version number. `original_text` is the source snapshot captured when translation begins. A row marked `user_modified=true` is skipped by whole-paper and single-Block automatic translation and is never overwritten without a future explicit force workflow.
 
@@ -131,11 +137,11 @@ The OpenAI adapter converts SDK exceptions before they leave the provider bounda
 }
 ```
 
-Supported codes are `AI_RATE_LIMITED`, `AI_AUTHENTICATION_FAILED`, `AI_PERMISSION_DENIED`, `AI_INVALID_REQUEST`, `AI_MODEL_UNAVAILABLE`, `AI_TIMEOUT`, `AI_CONNECTION_FAILED`, `AI_SERVICE_UNAVAILABLE`, and `TRANSLATION_FAILED`. Provider authentication failures are server-side `502` responses, not PaperGPT-user `401` responses, so they never log out the current user.
+Supported codes are `AI_RATE_LIMITED`, `AI_AUTHENTICATION_FAILED`, `AI_PERMISSION_DENIED`, `AI_INVALID_REQUEST`, `AI_MODEL_UNAVAILABLE`, `AI_TIMEOUT`, `AI_CONNECTION_FAILED`, `AI_SERVICE_UNAVAILABLE`, `AI_INVALID_BATCH_RESPONSE`, and `TRANSLATION_FAILED`. Provider authentication failures are server-side `502` responses, not PaperGPT-user `401` responses, so they never log out the current user.
 
 A failed provider call is transactionally persisted as `Translation.status=FAILED` with a short safe message; SDK response bodies, request headers, credentials, organization identifiers, and source PDF text are not stored or logged. A successful manual Retry changes the row to `COMPLETED` and clears `error_message`.
 
-Whole-paper translation stops immediately on provider-wide rate-limit, authentication, permission, model, timeout, connection, or availability failures. Its error envelope includes completed/skipped/failed/remaining partial counts. Already completed Blocks remain committed, the current failed Block is `FAILED`, and unattempted Blocks are not falsely marked failed. There is no automatic retry loop.
+Whole-paper translation stops immediately on provider-wide rate-limit, authentication, permission, model, timeout, connection, availability, or invalid-mapping failures. Its error envelope includes completed/skipped/failed/remaining/batch/request partial counts. Earlier batches remain committed, every current-batch Block leaves `PROCESSING`, and future Blocks remain unattempted. There is no automatic retry loop.
 
 ### Glossary, editing, and deterministic QA
 

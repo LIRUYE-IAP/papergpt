@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import math
+import uuid
+
+from pydantic import BaseModel, ValidationError
 
 from openai import (
     APIConnectionError as OpenAIAPIConnectionError,
@@ -21,6 +24,7 @@ from openai import (
 from app.ai.errors import (
     AIAuthenticationError,
     AIConnectionError,
+    AIInvalidBatchResponseError,
     AIInvalidRequestError,
     AIModelNotFoundError,
     AIPermissionError,
@@ -30,13 +34,30 @@ from app.ai.errors import (
     AIUnavailableError,
 )
 from app.ai.prompts import (
+    ACADEMIC_BATCH_TRANSLATION_INSTRUCTIONS,
     ACADEMIC_TRANSLATION_INSTRUCTIONS,
+    build_academic_batch_translation_input,
     build_academic_translation_input,
 )
 from app.ai.providers.base import TranslationProvider, TranslationProviderError
-from app.ai.types import TranslationRequest, TranslationResult
+from app.ai.types import (
+    BatchTranslationRequest,
+    BatchTranslationResult,
+    BatchTranslationResultItem,
+    TranslationRequest,
+    TranslationResult,
+)
 
 OPENAI_REQUEST_TIMEOUT_SECONDS = 60.0
+
+
+class _StructuredBatchTranslationItem(BaseModel):
+    block_id: uuid.UUID
+    translated_text: str
+
+
+class _StructuredBatchTranslationResponse(BaseModel):
+    translations: list[_StructuredBatchTranslationItem]
 
 
 def _retry_after_seconds(exc: OpenAIAPIStatusError) -> int | None:
@@ -118,6 +139,39 @@ class OpenAITranslationProvider(TranslationProvider):
             raise TranslationProviderError()
         return TranslationResult(
             translated_text=translated_text,
+            provider=self.name,
+            model=self.model,
+        )
+
+    def translate_batch(
+        self, request: BatchTranslationRequest
+    ) -> BatchTranslationResult:
+        try:
+            response = self._client.responses.parse(
+                model=self.model,
+                instructions=ACADEMIC_BATCH_TRANSLATION_INSTRUCTIONS,
+                input=build_academic_batch_translation_input(request),
+                text_format=_StructuredBatchTranslationResponse,
+                store=False,
+            )
+        except OpenAIAPIError as exc:
+            raise _map_openai_error(exc) from exc
+        except ValidationError as exc:
+            raise AIInvalidBatchResponseError() from exc
+        except Exception as exc:
+            raise AIProviderError() from exc
+
+        parsed = response.output_parsed
+        if parsed is None:
+            raise AIInvalidBatchResponseError()
+        return BatchTranslationResult(
+            items=tuple(
+                BatchTranslationResultItem(
+                    block_id=item.block_id,
+                    translated_text=item.translated_text,
+                )
+                for item in parsed.translations
+            ),
             provider=self.name,
             model=self.model,
         )

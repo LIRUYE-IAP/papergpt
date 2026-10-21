@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import uuid
 
 import httpx
 import openai
@@ -8,6 +9,7 @@ from app.ai.errors import (
     AIAuthenticationError,
     AIConnectionError,
     AIInvalidRequestError,
+    AIInvalidBatchResponseError,
     AIModelNotFoundError,
     AIPermissionError,
     AIProviderError,
@@ -19,7 +21,7 @@ from app.ai.providers.openai_provider import (
     OPENAI_REQUEST_TIMEOUT_SECONDS,
     OpenAITranslationProvider,
 )
-from app.ai.types import TranslationRequest
+from app.ai.types import BatchTranslationItem, BatchTranslationRequest, TranslationRequest
 
 
 REQUEST = TranslationRequest(
@@ -31,6 +33,31 @@ REQUEST = TranslationRequest(
     next_text=None,
     source_language="en",
     target_language="zh-CN",
+)
+
+BATCH_IDS = (
+    uuid.UUID("11111111-1111-1111-1111-111111111111"),
+    uuid.UUID("22222222-2222-2222-2222-222222222222"),
+)
+BATCH_REQUEST = BatchTranslationRequest(
+    paper_title="Safe test paper",
+    section_title="Introduction",
+    source_language="en",
+    target_language="zh-CN",
+    items=(
+        BatchTranslationItem(
+            block_id=BATCH_IDS[0],
+            block_type="PARAGRAPH",
+            source_text="First",
+            protected_text="First",
+        ),
+        BatchTranslationItem(
+            block_id=BATCH_IDS[1],
+            block_type="PARAGRAPH",
+            source_text="Second",
+            protected_text="Second",
+        ),
+    ),
 )
 
 
@@ -98,3 +125,41 @@ def test_openai_client_has_bounded_timeout_and_no_automatic_retries() -> None:
     provider = OpenAITranslationProvider(api_key="test-only-placeholder", model="test-model")
     assert provider._client.timeout == OPENAI_REQUEST_TIMEOUT_SECONDS
     assert provider._client.max_retries == 0
+
+
+def test_openai_batch_uses_structured_responses_and_preserves_uuid_order_independence() -> None:
+    provider = OpenAITranslationProvider(api_key="test-only-placeholder", model="test-model")
+    captured: dict[str, object] = {}
+
+    def parse_response(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            output_parsed=SimpleNamespace(
+                translations=[
+                    SimpleNamespace(block_id=BATCH_IDS[1], translated_text="第二"),
+                    SimpleNamespace(block_id=BATCH_IDS[0], translated_text="第一"),
+                ]
+            )
+        )
+
+    provider._client = SimpleNamespace(  # type: ignore[assignment]
+        responses=SimpleNamespace(parse=parse_response)
+    )
+    result = provider.translate_batch(BATCH_REQUEST)
+
+    assert captured["model"] == "test-model"
+    assert captured["store"] is False
+    assert captured["text_format"].__name__ == "_StructuredBatchTranslationResponse"
+    assert "11111111-1111-1111-1111-111111111111" in captured["input"]
+    assert [item.block_id for item in result.items] == [BATCH_IDS[1], BATCH_IDS[0]]
+
+
+def test_openai_batch_rejects_missing_structured_parse_result() -> None:
+    provider = OpenAITranslationProvider(api_key="test-only-placeholder", model="test-model")
+    provider._client = SimpleNamespace(  # type: ignore[assignment]
+        responses=SimpleNamespace(
+            parse=lambda **_kwargs: SimpleNamespace(output_parsed=None)
+        )
+    )
+    with pytest.raises(AIInvalidBatchResponseError):
+        provider.translate_batch(BATCH_REQUEST)

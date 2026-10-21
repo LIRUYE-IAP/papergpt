@@ -1,6 +1,6 @@
 # PaperGPT Architecture
 
-## Current system — Phase 4C-1
+## Current system — Phase 4C-2
 
 PaperGPT is a modular monolith with an independently runnable Next.js frontend and FastAPI backend.
 
@@ -8,7 +8,7 @@ PaperGPT is a modular monolith with an independently runnable Next.js frontend a
 | --- | --- | --- |
 | Frontend | Next.js App Router + PDF.js | Registration, login, library, upload, and synchronized Original/Structured/Chinese/Bilingual Reader |
 | Backend | FastAPI | Auth, Paper, PDF delivery, document-engine, glossary, translation editing/versioning/QA, and health APIs |
-| Translation core | Provider-neutral services + deterministic mock/OpenAI adapters | Block context, matched glossary constraints, token protection, prompting, persistence, versioning, deterministic QA, and normalized provider failures |
+| Translation core | Provider-neutral services + deterministic mock/OpenAI adapters | Section-aware synchronous multi-Block batching, structured UUID results, matched glossary constraints, token isolation, persistence, versioning, deterministic QA, and normalized provider failures |
 | Document engine | PyMuPDF + deterministic heuristics | Born-digital page/block extraction, bbox, columns, reading order, classification, sections, and debug JSON |
 | Persistence | SQLAlchemy 2 + Alembic | User, Paper, Section, Block, Translation, TranslationVersion, GlossaryTerm, and TranslationQAResult models |
 | Database | PostgreSQL + pgvector | Accounts, document structure, glossary constraints, translations, QA findings, and history; vectors remain future |
@@ -42,20 +42,23 @@ One parent-owned `activeBlockId` drives both active styles. PDF and structured s
 ## Academic translation pipeline
 
 ```text
-stable Document Block
--> document/section/local context
--> protected scientific placeholders
--> provider-neutral TranslationRequest
--> mock or OpenAI provider
--> strict placeholder restoration
--> Translation + immutable TranslationVersion
--> deterministic TranslationQAResult set
+eligible active Blocks in reading order
+-> Section-aware max-Block/max-character batches
+-> Block-isolated protected scientific placeholders
+-> provider-neutral BatchTranslationRequest
+-> one synchronous mock/OpenAI Responses request
+-> strict structured UUID validation
+-> per-item placeholder restoration
+-> per-Block Translation + immutable TranslationVersion
+-> per-Translation deterministic QA
 -> Block-linked Reader API
 ```
 
-The context builder selects the previous and next eligible Blocks in global reading order and injects only enabled glossary terms matching this bounded context. Those Blocks help resolve terminology but the prompt requests output for the current Block only. Serialized input is delimited JSON labelled as untrusted source-document data. Header/footer/page-number/reference Blocks, stale or non-translatable Blocks, figure/table bodies, and equations are conservatively skipped.
+Whole-paper translation groups at most six Blocks and 15,000 source characters by default, never crosses a Section boundary, and puts an oversized Block in a one-item batch without truncation. Internal items are already mutual context; only the external Block before and after the batch are added as edge context. The request includes only enabled glossary terms that actually match batch or edge text, with Paper scope overriding user-global scope. Serialized input is delimited JSON labelled as untrusted source-document data. Header/footer/page-number/reference Blocks, stale or non-translatable Blocks, figure/table bodies, equations, completed translations, and human edits are conservatively skipped.
 
-Provider code lives under `app.ai.providers`; translation business logic depends only on the abstract interface. `AI_PROVIDER=mock` is the zero-cost default. `AI_PROVIDER=openai` constructs the official Python SDK only after ownership and parsed-state checks, and requires an environment-provided key and model. The OpenAI adapter uses a stateless Responses API request with `store=False`. Tests never invoke it.
+Provider code lives under `app.ai.providers`; translation business logic depends only on `BatchTranslationRequest`/`BatchTranslationResult` and the abstract interface, never OpenAI SDK types. `AI_PROVIDER=mock` is the zero-cost default. The OpenAI adapter uses `responses.parse` with a strict Pydantic schema and `store=False`; output order is irrelevant because the service maps `block_id` back to `Block.id`. Unknown or duplicate IDs are fatal `AI_INVALID_BATCH_RESPONSE` mapping violations. Missing IDs and placeholder/empty-text corruption fail only their requested item. Tests never invoke the real provider.
+
+Phase 4C-2 “batch” means one synchronous Responses API call containing multiple adjacent Blocks. It explicitly does not use JSONL upload, OpenAI asynchronous Batch jobs, polling, job tables, Celery, SSE, WebSockets, or background workers.
 
 ## Provider error and recovery boundary
 
@@ -73,11 +76,11 @@ OpenAI SDK exception
 
 Single-Block failures return the mapped HTTP status after the Translation has been committed as `FAILED`. A later successful Retry reuses the stable Block/Translation identity, changes status to `COMPLETED`, and clears the safe error message. Provider authentication uses `502`, never the application's authentication `401`.
 
-Whole-paper processing commits each Block independently. Provider-wide failures stop the loop after the first failure and return partial translated/skipped/failed/remaining counts; prior successes remain, the failed Block is persisted, and remaining Blocks stay unattempted. Content-specific generic failures may continue under the existing per-Block isolation policy.
+Whole-paper processing commits per batch. Provider-wide failures stop after the current request and return partial translated/skipped/failed/remaining/batch/request counts; prior batches remain permanent, every current-batch Translation becomes `FAILED`, and future batches stay unattempted. Valid structured responses use per-item isolation, so one placeholder failure does not discard its valid siblings or stop later batches. No failure path falls back to N single-Block provider calls.
 
 Safe warning logs contain category, provider/model, Paper UUID, Block UUID, and provider HTTP status only. They omit credentials, authorization headers, provider response bodies, organization identifiers, complete prompts, and document text.
 
-Token preprocessing protects citations, Figure/Table references, number-unit expressions, selected atmospheric chemical species, and statistical notation. Placeholders use a deterministic source-derived namespace and a per-occurrence index, so repeated equal tokens remain independently restorable without colliding with ordinary document text. Restoration requires each placeholder exactly once, so a provider cannot silently drop, duplicate, or alter a protected scientific value.
+Token preprocessing protects citations, Figure/Table references, number-unit expressions, selected atmospheric chemical species, and statistical notation. Batch placeholders combine the source-derived namespace with the stable Block UUID and a per-occurrence index, so equal tokens in separate Blocks cannot cross-contaminate. Restoration requires each placeholder exactly once within its own output item.
 
 Each `(block_id, target_language)` has one current Translation. Every successful initial translation, retranslation, or manual edit appends a monotonically numbered TranslationVersion. Manual edits use reason `USER_EDIT`, set `user_modified=true`, and immediately refresh deterministic QA. Failed Blocks retain `FAILED` and `error_message`; successful Blocks are committed independently. `user_modified=true` is an unconditional automatic-translation skip.
 

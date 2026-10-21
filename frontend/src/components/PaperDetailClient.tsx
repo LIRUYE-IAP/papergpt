@@ -268,8 +268,8 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
       setPaper((current) => current ? { ...current, translation_status: result.failed_count ? "FAILED" : "COMPLETED" } : current);
       setTranslationNotice(
         result.failed_count
-          ? `翻译完成，但有 ${result.failed_count} 个段落失败，可在对应段落重试。`
-          : `翻译完成：${result.translated_count} 个段落已更新。`,
+          ? `翻译完成，但有 ${result.failed_count} 个段落失败；共使用 ${result.provider_request_count} 次 AI 请求。`
+          : `翻译完成：${result.translated_count} 个段落，共使用 ${result.provider_request_count} 次 AI 请求。`,
       );
       if (mode === "original" || mode === "structured" || mode === "split") selectMode("chinese");
     } catch (requestError: unknown) {
@@ -282,7 +282,7 @@ export default function PaperDetailClient({ paperId }: { paperId: string }) {
       setTranslationNotice(
         `${requestError instanceof ApiError && requestError.code === "AI_RATE_LIMITED" ? "翻译已暂停：" : ""}${message}` +
         (partial && partial.translated_count > 0
-          ? ` 已保留 ${partial.translated_count} 个已完成段落。`
+          ? ` 已保留 ${partial.translated_count} 个已完成段落；已使用 ${partial.provider_request_count} 次 AI 请求。`
           : ""),
       );
       setPaper((current) => current ? { ...current, translation_status: "FAILED" } : current);

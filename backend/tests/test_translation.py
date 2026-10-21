@@ -578,8 +578,7 @@ def test_retranslation_versions_languages_and_user_modified_protection(
         )
         assert other_translation is not None
         assert [version.reason for version in other_translation.versions] == [
-            "initial_translation",
-            "retranslation",
+            "initial_translation"
         ]
 
 

@@ -96,5 +96,12 @@ class AIUnavailableError(AIProviderError):
     stop_batch = True
 
 
+class AIInvalidBatchResponseError(AIProviderError):
+    code = "AI_INVALID_BATCH_RESPONSE"
+    safe_message = "Translation provider returned an invalid batch response."
+    http_status = 502
+    stop_batch = True
+
+
 class TranslationFailedError(TranslationExecutionError):
     """A non-provider translation pipeline step failed safely."""

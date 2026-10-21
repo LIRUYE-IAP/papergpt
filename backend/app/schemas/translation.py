@@ -52,6 +52,8 @@ class TranslationRunResponse(BaseModel):
     skipped_count: int
     failed_count: int
     remaining_count: int = 0
+    batch_count: int = 0
+    provider_request_count: int = 0
 
 
 class BlockTranslationRunResponse(TranslationRunResponse):
@@ -63,6 +65,8 @@ class TranslationPartialResult(BaseModel):
     skipped_count: int
     failed_count: int
     remaining_count: int
+    batch_count: int = 0
+    provider_request_count: int = 0
 
 
 class TranslationErrorDetail(BaseModel):

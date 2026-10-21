@@ -51,6 +51,8 @@ def isolated_test_data(
     monkeypatch.setattr(settings, "ai_provider", "mock")
     monkeypatch.setattr(settings, "openai_api_key", None)
     monkeypatch.setattr(settings, "papergpt_test_ai_failure", None)
+    monkeypatch.setattr(settings, "translation_batch_max_blocks", 6)
+    monkeypatch.setattr(settings, "translation_batch_max_chars", 15_000)
     yield
     remove_test_users()
 

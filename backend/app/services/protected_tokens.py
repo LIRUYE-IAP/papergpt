@@ -41,10 +41,14 @@ _PLACEHOLDER_PATTERN = re.compile(
 )
 
 
-def _placeholder_namespace(source_text: str) -> str:
+def _placeholder_namespace(source_text: str, namespace_seed: str | None = None) -> str:
     counter = 0
     while True:
-        digest_source = f"{counter}\0{source_text}".encode("utf-8")
+        digest_source = (
+            f"{counter}\0{source_text}"
+            if namespace_seed is None
+            else f"{counter}\0{namespace_seed}\0{source_text}"
+        ).encode("utf-8")
         namespace = hashlib.sha256(digest_source).hexdigest()[:16].upper()
         collision_pattern = re.compile(
             rf"__PAPERGPT_{namespace}_TOKEN_\d{{4}}__"
@@ -54,7 +58,11 @@ def _placeholder_namespace(source_text: str) -> str:
         counter += 1
 
 
-def protect_scientific_tokens(source_text: str) -> ProtectedText:
+def protect_scientific_tokens(
+    source_text: str,
+    *,
+    namespace_seed: str | None = None,
+) -> ProtectedText:
     matches: list[tuple[int, int, str]] = []
     occupied: list[tuple[int, int]] = []
     for pattern in _PATTERNS:
@@ -69,7 +77,7 @@ def protect_scientific_tokens(source_text: str) -> ProtectedText:
     tokens: dict[str, str] = {}
     parts: list[str] = []
     cursor = 0
-    namespace = _placeholder_namespace(source_text)
+    namespace = _placeholder_namespace(source_text, namespace_seed)
     for index, (start, end, value) in enumerate(matches):
         placeholder = f"__PAPERGPT_{namespace}_TOKEN_{index:04d}__"
         parts.append(source_text[cursor:start])

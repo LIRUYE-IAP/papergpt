@@ -7,17 +7,26 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai.factory import get_translation_provider
-from app.ai.errors import TranslationExecutionError, TranslationFailedError
+from app.ai.errors import (
+    AIInvalidBatchResponseError,
+    TranslationExecutionError,
+    TranslationFailedError,
+)
 from app.ai.providers import TranslationProvider
+from app.ai.types import BatchTranslationItem, BatchTranslationRequest
+from app.core.config import settings
 from app.models.document import Block
 from app.models.paper import Paper
 from app.models.translation import Translation, TranslationStatus, TranslationVersion
 from app.models.user import User
 from app.services.papers import get_owned_paper
+from app.services.glossary import relevant_glossary
 from app.services.protected_tokens import (
+    ProtectedText,
     protect_scientific_tokens,
     restore_scientific_tokens,
 )
+from app.services.translation_batches import TranslationBatch, build_translation_batches
 from app.services.translation_context import (
     build_translation_context,
     get_owned_block,
@@ -46,6 +55,8 @@ class TranslationRunResult:
     skipped_count: int
     failed_count: int
     remaining_count: int = 0
+    batch_count: int = 0
+    provider_request_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -104,14 +115,14 @@ def _next_version_number(db: Session, translation_id: uuid.UUID) -> int:
     return int(current or 0) + 1
 
 
-def _translate_block(
+def _get_or_create_translation(
     db: Session,
     *,
     paper: Paper,
     block: Block,
     target_language: str,
     provider: TranslationProvider,
-) -> BlockTranslationOutcome:
+) -> Translation:
     translation = _existing_translation(
         db,
         block_id=block.id,
@@ -133,13 +144,81 @@ def _translate_block(
         )
         db.add(translation)
         db.flush()
+    return translation
 
+
+def _set_translation_processing(
+    translation: Translation,
+    *,
+    paper: Paper,
+    block: Block,
+    provider: TranslationProvider,
+) -> None:
     translation.status = TranslationStatus.PROCESSING
     translation.error_message = None
     translation.original_text = block.original_text
     translation.source_language = paper.source_language or "auto"
     translation.provider = provider.name
     translation.model = provider.model
+
+
+def _set_translation_failed(
+    translation: Translation,
+    error: TranslationExecutionError,
+) -> None:
+    translation.status = TranslationStatus.FAILED
+    translation.error_message = error.safe_message
+
+
+def _persist_translation_success(
+    db: Session,
+    *,
+    translation: Translation,
+    translated_text: str,
+    provider: str,
+    model: str,
+) -> None:
+    version_number = _next_version_number(db, translation.id)
+    db.add(
+        TranslationVersion(
+            translation_id=translation.id,
+            translated_text=translated_text,
+            provider=provider,
+            model=model,
+            version_number=version_number,
+            reason="initial_translation" if version_number == 1 else "retranslation",
+        )
+    )
+    translation.translated_text = translated_text
+    translation.provider = provider
+    translation.model = model
+    translation.status = TranslationStatus.COMPLETED
+    translation.translated_at = datetime.now(timezone.utc)
+    translation.error_message = None
+    replace_translation_qa(db, translation)
+
+
+def _translate_block(
+    db: Session,
+    *,
+    paper: Paper,
+    block: Block,
+    target_language: str,
+    provider: TranslationProvider,
+) -> BlockTranslationOutcome:
+    translation = _get_or_create_translation(
+        db,
+        paper=paper,
+        block=block,
+        target_language=target_language,
+        provider=provider,
+    )
+    _set_translation_processing(
+        translation,
+        paper=paper,
+        block=block,
+        provider=provider,
+    )
     db.commit()
 
     try:
@@ -158,26 +237,13 @@ def _translate_block(
         if not translated_text:
             raise ValueError("Provider returned an empty translation")
 
-        version_number = _next_version_number(db, translation.id)
-        db.add(
-            TranslationVersion(
-                translation_id=translation.id,
-                translated_text=translated_text,
-                provider=result.provider,
-                model=result.model,
-                version_number=version_number,
-                reason=(
-                    "initial_translation" if version_number == 1 else "retranslation"
-                ),
-            )
+        _persist_translation_success(
+            db,
+            translation=translation,
+            translated_text=translated_text,
+            provider=result.provider,
+            model=result.model,
         )
-        translation.translated_text = translated_text
-        translation.provider = result.provider
-        translation.model = result.model
-        translation.status = TranslationStatus.COMPLETED
-        translation.translated_at = datetime.now(timezone.utc)
-        translation.error_message = None
-        replace_translation_qa(db, translation)
         db.commit()
         db.refresh(translation)
         return BlockTranslationOutcome(True, translation)
@@ -191,8 +257,7 @@ def _translate_block(
         failed_translation = db.get(Translation, translation.id)
         if failed_translation is None:
             raise failure
-        failed_translation.status = TranslationStatus.FAILED
-        failed_translation.error_message = failure.safe_message
+        _set_translation_failed(failed_translation, failure)
         db.commit()
         db.refresh(failed_translation)
     except Exception:
@@ -210,6 +275,107 @@ def _translate_block(
         failure.provider_status,
     )
     return BlockTranslationOutcome(False, failed_translation, failure)
+
+
+def _batch_external_context(
+    batch: TranslationBatch,
+    candidates: list[Block],
+) -> tuple[str | None, str | None]:
+    indexes = {block.id: index for index, block in enumerate(candidates)}
+    first_index = indexes[batch.blocks[0].id]
+    last_index = indexes[batch.blocks[-1].id]
+    previous_text = candidates[first_index - 1].original_text if first_index > 0 else None
+    next_text = (
+        candidates[last_index + 1].original_text
+        if last_index + 1 < len(candidates)
+        else None
+    )
+    return previous_text, next_text
+
+
+def _build_batch_request(
+    db: Session,
+    *,
+    paper: Paper,
+    batch: TranslationBatch,
+    candidates: list[Block],
+    target_language: str,
+) -> tuple[BatchTranslationRequest, dict[uuid.UUID, ProtectedText]]:
+    previous_text, next_text = _batch_external_context(batch, candidates)
+    source_language = paper.source_language or "auto"
+    batch_glossary = relevant_glossary(
+        db,
+        user_id=paper.user_id,
+        paper_id=paper.id,
+        source_language=source_language,
+        target_language=target_language,
+        texts=[
+            previous_text,
+            *(block.original_text for block in batch.blocks),
+            next_text,
+        ],
+    )
+    protections: dict[uuid.UUID, ProtectedText] = {}
+    items: list[BatchTranslationItem] = []
+    for block in batch.blocks:
+        protected = protect_scientific_tokens(
+            block.original_text,
+            namespace_seed=str(block.id),
+        )
+        protections[block.id] = protected
+        item_glossary = relevant_glossary(
+            db,
+            user_id=paper.user_id,
+            paper_id=paper.id,
+            source_language=source_language,
+            target_language=target_language,
+            texts=[block.original_text],
+        )
+        items.append(
+            BatchTranslationItem(
+                block_id=block.id,
+                block_type=block.block_type.value,
+                source_text=block.original_text,
+                protected_text=protected.text,
+                relevant_glossary=item_glossary,
+            )
+        )
+    return (
+        BatchTranslationRequest(
+            paper_title=paper.title or paper.original_filename,
+            section_title=batch.section_title,
+            source_language=source_language,
+            target_language=target_language,
+            items=tuple(items),
+            glossary=batch_glossary,
+            external_previous_context=previous_text,
+            external_next_context=next_text,
+        ),
+        protections,
+    )
+
+
+def _validated_batch_results(request, result):
+    requested_ids = {item.block_id for item in request.items}
+    mapped = {}
+    for item in result.items:
+        if item.block_id not in requested_ids or item.block_id in mapped:
+            raise AIInvalidBatchResponseError()
+        mapped[item.block_id] = item
+    return mapped
+
+
+def _mark_batch_failed(
+    db: Session,
+    translations: dict[uuid.UUID, Translation],
+    error: TranslationExecutionError,
+) -> None:
+    db.rollback()
+    for translation in translations.values():
+        persisted = db.get(Translation, translation.id)
+        if persisted is not None:
+            _set_translation_failed(persisted, error)
+    db.commit()
 
 
 def translate_owned_paper(
@@ -240,6 +406,7 @@ def translate_owned_paper(
     paper.target_language = normalized_target
     db.commit()
 
+    candidates = [block for block in blocks if is_translation_candidate(block)]
     translatable_blocks: list[Block] = []
     skipped_count = 0
     for block in blocks:
@@ -254,36 +421,171 @@ def translate_owned_paper(
         if existing is not None and existing.user_modified:
             skipped_count += 1
             continue
+        if existing is not None and existing.status == TranslationStatus.COMPLETED:
+            skipped_count += 1
+            continue
         translatable_blocks.append(block)
 
+    batches = build_translation_batches(
+        translatable_blocks,
+        max_blocks=settings.translation_batch_max_blocks,
+        max_chars=settings.translation_batch_max_chars,
+    )
     translated_count = 0
     failed_count = 0
-    for index, block in enumerate(translatable_blocks):
-        outcome = _translate_block(
+    provider_request_count = 0
+    attempted_batch_count = 0
+    for batch_index, batch in enumerate(batches):
+        attempted_batch_count += 1
+        request, protections = _build_batch_request(
             db,
             paper=paper,
-            block=block,
+            batch=batch,
+            candidates=candidates,
             target_language=normalized_target,
-            provider=active_provider,
         )
-        if outcome.succeeded:
-            translated_count += 1
-        else:
-            failed_count += 1
-            if outcome.error is not None and outcome.error.stop_batch:
-                paper = db.get(Paper, paper.id)
-                if paper is not None:
-                    paper.translation_status = TranslationStatus.FAILED.value
-                    db.commit()
-                raise TranslationRunInterrupted(
-                    outcome.error,
-                    TranslationRunResult(
-                        translated_count=translated_count,
-                        skipped_count=skipped_count,
-                        failed_count=failed_count,
-                        remaining_count=len(translatable_blocks) - index - 1,
-                    ),
+        translations: dict[uuid.UUID, Translation] = {}
+        for block in batch.blocks:
+            translation = _get_or_create_translation(
+                db,
+                paper=paper,
+                block=block,
+                target_language=normalized_target,
+                provider=active_provider,
+            )
+            _set_translation_processing(
+                translation,
+                paper=paper,
+                block=block,
+                provider=active_provider,
+            )
+            translations[block.id] = translation
+        db.commit()
+        provider_request_count += 1
+        started_at = datetime.now(timezone.utc)
+        provider_failure: TranslationExecutionError | None = None
+        try:
+            result = active_provider.translate_batch(request)
+            mapped_results = _validated_batch_results(request, result)
+        except TranslationExecutionError as exc:
+            provider_failure = exc
+        except Exception:
+            provider_failure = TranslationFailedError()
+        if provider_failure is not None:
+            _mark_batch_failed(db, translations, provider_failure)
+            failed_count += len(batch.blocks)
+            paper = db.get(Paper, paper.id)
+            if paper is not None:
+                paper.translation_status = TranslationStatus.FAILED.value
+                db.commit()
+            logger.warning(
+                "translation_batch_failed category=%s provider=%s model=%s "
+                "paper_id=%s batch_index=%s block_count=%s character_count=%s "
+                "provider_status=%s",
+                provider_failure.code,
+                active_provider.name,
+                active_provider.model,
+                paper_id,
+                batch_index,
+                len(batch.blocks),
+                batch.character_count,
+                provider_failure.provider_status,
+            )
+            remaining_count = sum(
+                len(remaining.blocks) for remaining in batches[batch_index + 1 :]
+            )
+            raise TranslationRunInterrupted(
+                provider_failure,
+                TranslationRunResult(
+                    translated_count=translated_count,
+                    skipped_count=skipped_count,
+                    failed_count=failed_count,
+                    remaining_count=remaining_count,
+                    batch_count=attempted_batch_count,
+                    provider_request_count=provider_request_count,
+                ),
+            ) from provider_failure
+
+        item_failure = TranslationFailedError()
+        batch_completed_count = 0
+        batch_failed_count = 0
+        try:
+            for block in batch.blocks:
+                translation = translations[block.id]
+                result_item = mapped_results.get(block.id)
+                if result_item is None:
+                    _set_translation_failed(translation, item_failure)
+                    batch_failed_count += 1
+                    continue
+                try:
+                    translated_text = restore_scientific_tokens(
+                        result_item.translated_text,
+                        protections[block.id].tokens,
+                    ).strip()
+                    if not translated_text:
+                        raise ValueError("Provider returned an empty translation")
+                except ValueError:
+                    _set_translation_failed(translation, item_failure)
+                    batch_failed_count += 1
+                    logger.warning(
+                        "translation_batch_item_failed category=%s provider=%s "
+                        "model=%s paper_id=%s batch_index=%s block_id=%s",
+                        item_failure.code,
+                        active_provider.name,
+                        active_provider.model,
+                        paper_id,
+                        batch_index,
+                        block.id,
+                    )
+                    continue
+                _persist_translation_success(
+                    db,
+                    translation=translation,
+                    translated_text=translated_text,
+                    provider=result.provider,
+                    model=result.model,
                 )
+                batch_completed_count += 1
+            db.commit()
+            translated_count += batch_completed_count
+            failed_count += batch_failed_count
+        except Exception:
+            failure = TranslationFailedError()
+            _mark_batch_failed(db, translations, failure)
+            failed_count += len(batch.blocks)
+            paper = db.get(Paper, paper.id)
+            if paper is not None:
+                paper.translation_status = TranslationStatus.FAILED.value
+                db.commit()
+            raise TranslationRunInterrupted(
+                failure,
+                TranslationRunResult(
+                    translated_count=translated_count,
+                    skipped_count=skipped_count,
+                    failed_count=failed_count,
+                    remaining_count=sum(
+                        len(remaining.blocks)
+                        for remaining in batches[batch_index + 1 :]
+                    ),
+                    batch_count=attempted_batch_count,
+                    provider_request_count=provider_request_count,
+                ),
+            ) from None
+
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
+        logger.info(
+            "translation_batch_completed paper_id=%s batch_index=%s "
+            "block_count=%s character_count=%s provider=%s model=%s duration_ms=%s",
+            paper_id,
+            batch_index,
+            len(batch.blocks),
+            batch.character_count,
+            active_provider.name,
+            active_provider.model,
+            duration_ms,
+        )
 
     paper = db.get(Paper, paper.id)
     if paper is not None:
@@ -298,6 +600,8 @@ def translate_owned_paper(
         translated_count=translated_count,
         skipped_count=skipped_count,
         failed_count=failed_count,
+        batch_count=len(batches),
+        provider_request_count=provider_request_count,
     )
 
 
@@ -332,6 +636,8 @@ def translate_owned_block(
             translated_count=0,
             skipped_count=1,
             failed_count=0,
+            batch_count=0,
+            provider_request_count=0,
             translation=existing,
         )
 
@@ -355,6 +661,8 @@ def translate_owned_block(
         translated_count=1 if outcome.succeeded else 0,
         skipped_count=0,
         failed_count=0 if outcome.succeeded else 1,
+        batch_count=1,
+        provider_request_count=1,
         translation=outcome.translation,
     )
 

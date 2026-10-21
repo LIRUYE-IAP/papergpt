@@ -227,6 +227,8 @@ def translate_paper(
                 skipped_count=exc.result.skipped_count,
                 failed_count=exc.result.failed_count,
                 remaining_count=exc.result.remaining_count,
+                batch_count=exc.result.batch_count,
+                provider_request_count=exc.result.provider_request_count,
             ),
         )
     except TranslationExecutionError as exc:

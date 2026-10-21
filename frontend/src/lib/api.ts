@@ -85,6 +85,8 @@ export type TranslationRun = {
   skipped_count: number;
   failed_count: number;
   remaining_count: number;
+  batch_count: number;
+  provider_request_count: number;
 };
 
 export type BlockTranslationRun = TranslationRun & {
@@ -187,7 +189,14 @@ const REQUEST_TIMEOUT_MS = 95_000;
 function isTranslationRun(value: unknown): value is TranslationRun {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
-  return ["translated_count", "skipped_count", "failed_count", "remaining_count"]
+  return [
+    "translated_count",
+    "skipped_count",
+    "failed_count",
+    "remaining_count",
+    "batch_count",
+    "provider_request_count",
+  ]
     .every((key) => typeof candidate[key] === "number");
 }
 
@@ -217,6 +226,8 @@ export function translationErrorMessage(error: unknown): string {
       return "当前翻译模型暂不可用，请检查模型配置。";
     case "AI_SERVICE_UNAVAILABLE":
       return "AI 翻译服务暂不可用，请稍后重试。";
+    case "AI_INVALID_BATCH_RESPONSE":
+      return "AI 翻译服务返回了无法安全映射的批量结果，请稍后重试。";
     default:
       return "翻译失败，请稍后重试。";
   }
@@ -236,6 +247,8 @@ export function storedTranslationErrorMessage(message: string | null): string {
       return "当前翻译模型暂不可用，请检查模型配置。";
     case "Translation provider is temporarily unavailable.":
       return "AI 翻译服务暂不可用，请稍后重试。";
+    case "Translation provider returned an invalid batch response.":
+      return "AI 翻译服务返回了无法安全映射的批量结果，请稍后重试。";
     default:
       return "翻译失败，请稍后重试。";
   }

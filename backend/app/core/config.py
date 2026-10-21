@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     ai_provider: str = "mock"
     openai_api_key: str | None = None
     openai_translation_model: str = "gpt-5-mini"
+    translation_batch_max_blocks: int = Field(default=6, ge=1, le=50)
+    translation_batch_max_chars: int = Field(default=15_000, ge=1, le=200_000)
     papergpt_test_ai_failure: str | None = None
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
